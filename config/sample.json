@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "batch_id": "sample-001",
+  "time_range": {"start": "2026-10-28T08:30:00+09:00", "end": "2026-10-28T08:35:00+09:00"},
+  "masked": true,
+  "coverage": {"fastapi": "collected", "postgresql": "not_collected"},
+  "error_counts": {"fastapi": {"ERROR": 2}},
+  "events": [
+    {"event_id": "evt-1", "service": "fastapi", "level": "ERROR", "message": "Database connection timeout"},
+    {"event_id": "evt-2", "service": "fastapi", "level": "ERROR", "message": "Database connection timeout"}
+  ],
+  "metrics": [{"metric_id": "metric-1", "name": "memory_percent", "value": 65}],
+  "collection_failures": [{"service": "postgresql", "reason": "sample does not include database logs"}]
+}

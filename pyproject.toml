@@ -1,0 +1,32 @@
+[project]
+name = "eft-library-aiops"
+version = "0.1.0"
+description = "Read-only Codex analysis for EFT Library operations"
+readme = "README.md"
+authors = [
+    { name = "poeynus", email = "poeynus@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.14.1",
+    "python-dotenv>=1.2.4",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.14,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "aiops"
+
+[project.scripts]
+aiops = "aiops.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: opt-in real Codex invocation"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]

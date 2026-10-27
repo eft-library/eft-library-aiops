@@ -83,3 +83,6 @@ eft-library-aiops/
 - 샘플 분석 결과 및 테스트
 - 설정·보안·운영 안내
 - Phase 2에서 사용할 입력 데이터 계약 초안
+
+## 9. 로컬 구현 결과
+Phase 1 로컬 구현 및 샘플 실호출 검증을 완료했다. 선택한 CLI 어댑터와 SDK 비교는 [CODEX_PROVIDER.md](CODEX_PROVIDER.md), 테스트 결과와 운영 검증 대기 항목은 [PHASE1_VALIDATION.md](PHASE1_VALIDATION.md)를 참고한다.

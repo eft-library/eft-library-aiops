@@ -218,3 +218,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# AIOps runtime data, credentials and snapshots
+.aiops/
+.codex/
+auth.json
