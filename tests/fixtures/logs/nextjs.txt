@@ -1,0 +1,3 @@
+2026-10-28T08:30:00+09:00 INFO GET / 200
+2026-10-28T08:31:00+09:00 ERROR upstream request failed user_id=12345
+2026-10-28T08:31:01+09:00 INFO request completed

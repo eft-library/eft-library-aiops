@@ -1,0 +1,8 @@
+2026-10-28T08:30:00+09:00 INFO startup completed
+2026-10-28T08:31:00+09:00 ERROR Database connection timeout password=demo-secret
+Traceback (most recent call last):
+  File "/home/demo/app.py", line 42, in connect
+    raise ConnectionError("database timeout")
+ConnectionError: database timeout
+2026-10-28T08:31:02+09:00 ERROR Database connection timeout password=demo-secret
+2026-10-28T08:31:03+09:00 INFO 192.0.2.7 - "GET /health HTTP/1.1" 503 request_time=0.15

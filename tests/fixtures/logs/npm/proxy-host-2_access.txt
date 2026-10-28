@@ -1,0 +1,2 @@
+192.0.2.2 - - [28/Oct/2026:08:31:03 +0900] "GET /api?token=demo-token HTTP/1.1" 502 123 "-" "fixture" request_time=0.25
+[28/Oct/2026:08:31:04 +0900] - 404 404 - GET back.example.test "/missing" [Client 192.0.2.3]

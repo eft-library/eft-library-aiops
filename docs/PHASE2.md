@@ -150,3 +150,6 @@ sources:
 
 ## 10. Codex 작업 지시
 > Phase 2를 로컬에서 구현하라. 운영 경로와 fixture 설정을 분리하고 운영 접근 없이 수집·정제·배치 저장을 검증하라. 운영 배포용 경로를 설정에 반영하되, 권한이 없는 파일은 우회 접근하지 말고 실패로 기록하라. 먼저 Next.js/FastAPI/PostgreSQL에 대한 범용 Collector와 fixture 테스트를 완성하라. 서비스 설정이나 로그 파일을 변경하지 말고, 증분 수집·회전·체크포인트·마스킹을 검증한 후 나머지 소스로 확장하라.
+
+## 11. 로컬 구현 결과
+Phase 2의 로컬 구현과 fixture 검증을 완료했다. 실제 명령·옵션·SQLite 저장/복구·제한·Airflow 연결 설계는 [COLLECTION.md](COLLECTION.md), 검증 결과와 운영 확인 대기 항목은 [PHASE2_VALIDATION.md](PHASE2_VALIDATION.md), 실제 배치 계약은 [BATCH_CONTRACT.md](BATCH_CONTRACT.md)를 따른다. 현재 사용자 운영 조건인 root 실행을 지원하며 계정 전환이나 권한 변경을 선행 조건으로 삼지 않는다.

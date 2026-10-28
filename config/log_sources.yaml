@@ -1,0 +1,65 @@
+# Operational profile. Use explicitly with --config config/log_sources.yaml.
+version: 1
+max_total_read_mb: 20
+initial_tail_mb: 1
+# Per-source budget is also limited by a fair share of the remaining global budget.
+timeout_seconds: 60
+max_files: 2000
+max_scan_entries: 10000
+max_records: 20000
+max_snapshot_bytes: 90000
+defaults:
+  enabled: true
+  recursive: false
+  include_rotated: false
+  max_read_mb: 5
+  timezone: Asia/Seoul
+system:
+  enabled: true
+  disks: ['/']
+docker:
+  enabled: false
+  # Opt-in only: replace with actual service container names (exclude init containers).
+  containers: []
+  timeout_seconds: 5
+sources:
+  nextjs:
+    type: file
+    path: /home/frontend_a/eft-library-front/log.out
+  fastapi:
+    type: file
+    path: /home/backend/eft-library-back/log.out
+  postgresql:
+    type: directory
+    path: /var/lib/pgsql/17/data/log
+    pattern: 'postgresql-*.log'
+  redis:
+    type: file
+    path: /var/log/redis/redis.log
+  kafka:
+    type: file
+    path: /home/kafka/kafka_2.13-4.1.1/kafka.log
+  kafka_detail:
+    type: directory
+    path: /home/kafka/kafka_2.13-4.1.1/logs
+    pattern: '*.log'
+  kafka_consumer:
+    type: directory
+    path: /home/kafka/eft-library-kafka/logs
+    pattern: '*.log'
+  airflow:
+    type: directory
+    path: /home/airflow/logs
+    pattern: '*.log'
+    recursive: true
+  airflow_health:
+    type: file
+    path: /home/airflow/latest_data/health_check.log
+  npm:
+    type: directory
+    path: /home/tool/npm/data/logs
+    pattern: '*.log'
+  rustfs:
+    type: directory
+    path: /home/tool/rustfs/logs
+    pattern: '*.log'

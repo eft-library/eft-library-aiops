@@ -1,0 +1,23 @@
+version: 1
+max_total_read_mb: 2
+initial_tail_mb: 0.25
+system:
+  enabled: true
+  disks: ['/']
+docker:
+  enabled: false
+sources:
+  nextjs:
+    type: file
+    path: ../tests/fixtures/logs/nextjs.txt
+  fastapi:
+    type: file
+    path: ../tests/fixtures/logs/fastapi.txt
+  postgresql:
+    type: directory
+    path: ../tests/fixtures/logs/postgresql
+    pattern: '*.txt'
+  npm:
+    type: directory
+    path: ../tests/fixtures/logs/npm
+    pattern: '*.txt'

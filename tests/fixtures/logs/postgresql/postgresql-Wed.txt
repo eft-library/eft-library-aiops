@@ -1,0 +1,2 @@
+2026-10-28 08:30:00.000 KST [123] INFO connection accepted
+2026-10-28 08:31:00.000 KST [123] ERROR connection failed for user username=demo
