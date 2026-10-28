@@ -316,3 +316,52 @@ def test_timestamped_websocket_query_token_is_masked():
     assert secret not in events[0].model_dump_json()
     assert "192.0.2.4" not in events[0].message
     assert "token=[REDACTED]" in events[0].message
+
+
+def test_postgres_log_is_informational_not_unknown():
+    events = parse(
+        "2026-10-22 00:02:35.733 KST [123] LOG: checkpoint starting: time",
+        service="postgresql",
+    )
+    assert events[0].level == "INFO"
+    assert events[0].metadata["native_level"] == "LOG"
+    assert not events[0].metadata["parse_failed"]
+
+
+def test_native_postgresql_severity_wins_over_words_inside_statement():
+    events = parse(
+        "2026-10-22 00:02:35.733 KST [123] LOG: statement contains ERROR label",
+        service="postgresql",
+    )
+    assert events[0].level == "INFO"
+
+
+def test_npm_single_status_and_unknown_upstream_are_counted():
+    events = parse(
+        '[28/Oct/2026:11:00:00 +0900] 400 - - http example.test "-"\n'
+        '[28/Oct/2026:11:00:01 +0900] - - 421 - GET http example.test "/"',
+        service="npm",
+    )
+    assert [event.metadata["http_status"] for event in events] == [400, 421]
+    assert all(event.level == "WARNING" for event in events)
+    assert all(not event.metadata["parse_failed"] for event in events)
+
+
+def test_npm_access_status_determines_severity_not_user_controlled_url():
+    event = parse(
+        '[28/Oct/2026:11:00:00 +0900] - 200 200 - GET http example.test "/WARNING/ERROR"',
+        service="npm",
+    )[0]
+    assert event.level == "INFO"
+    assert event.metadata["http_status"] == 200
+
+
+def test_airflow_health_success_markers_and_failed_checks():
+    events = parse(
+        "[2026-10-28 02:05:00] ==================== Health check ====================\n"
+        "[2026-10-28 02:05:00] ✅ [OK] scheduler\n"
+        "[2026-10-28 02:05:01] ❌ scheduler unavailable",
+        service="airflow_health",
+    )
+    assert [event.level for event in events] == ["INFO", "INFO", "ERROR"]
+    assert all(not event.metadata["parse_failed"] for event in events)

@@ -105,7 +105,7 @@ $AIOPS_DATA_DIR/collection/
 
 ## 시각 없는 로그와 운영 형식
 
-FastAPI 접근 로그의 ` - 0.011s` 같은 끝부분 응답 시간을 밀리초로 변환한다. Next.js의 오류 표시·예외 클래스·스택 꼬리(`digest`, 닫는 중괄호 등)를 같은 오류로 결합한다. Redis 날짜/기호형 수준, PostgreSQL 명시적 UTC/KST, Nginx 슬래시 날짜와 ANSI 제어문자도 처리한다.
+FastAPI 접근 로그의 ` - 0.011s` 같은 끝부분 응답 시간을 밀리초로 변환한다. Next.js의 오류 표시·예외 클래스·스택 꼬리(`digest`, 닫는 중괄호 등)를 같은 오류로 결합한다. Redis 날짜/기호형 수준, PostgreSQL 명시적 UTC/KST와 LOG/NOTICE 등 정보성 수준, Nginx 슬래시 날짜와 ANSI 제어문자도 처리한다. NPM 접근 로그의 단일 상태 코드 및 upstream이 없는 상태 코드도 집계하고 접근 URL 안의 ERROR/WARNING 문자열로 수준을 정하지 않는다. Airflow health의 명시적 [OK]/실패 표시와 구분선은 별도로 인식한다.
 
 Next.js의 `[2026-10-28 10:45:06 +0900]` 접두사와 시각이 추가된 Uvicorn WebSocket/연결 로그를 지원한다. 괄호 안 공백 뒤의 명시적 오프셋을 우선하며, 시각이 매 줄에 붙은 스택도 본문 들여쓰기·예외 꼬리로 결합한다. 원문에 시각이 없는 이전 Next.js stdout·Uvicorn 로그는 시각을 만들어 넣지 않는다. `timestamp=null`을 유지하고 metadata의 `timestamp_status`를 `absent`로 표시한다. 시각으로 보이는 선두 형식이 있지만 해석하지 못하면 `unrecognized`다. 레벨 미인식은 `level_unrecognized`로 별도 표시한다. 배치 totals에도 `timestamp_absent`, `timestamp_unrecognized`, `level_unrecognized` 건수를 추가한다. 기존 `parse_failed`는 이전과 같이 시각 또는 수준 미인식 전체 건수다.
 

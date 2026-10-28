@@ -22,6 +22,9 @@ HTTP = re.compile(
 NPM_HTTP = re.compile(
     r"(?:\[(\d{3})\]\s+\[(\d{3})\]|\]\s+-\s+(\d{3})\s+(\d{3})\s+-)\s+(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b"
 )
+NPM_ACCESS = re.compile(
+    r"^\[\d{1,2}/[A-Za-z]{3}/\d{4}:[^\]]+\]\s+(?:-\s+(?:\d{3}|-)\s+(?P<pair>\d{3})\s+-\s+|(?P<single>\d{3})\s+-\s+)"
+)
 LATENCY = re.compile(
     r"\b(?:request_time|response_time|duration)\s*[=:]\s*(\d+(?:\.\d+)?)\s*(ms|s)?\b",
     re.I,
@@ -48,7 +51,13 @@ WRAPPED = re.compile(
 
 def log_body(line):
     wrapper = WRAPPED.match(line)
-    return wrapper["body"] if wrapper else line
+    if wrapper:
+        return wrapper["body"]
+    prefix = re.match(
+        r"^\s*" + STAMP.pattern + r"(?:\s+(?:UTC|GMT|KST))?(?:\s+\[\d+\])?\s*(?:-\s*)?",
+        line,
+    )
+    return line[prefix.end() :] if prefix else line
 
 
 def timestamp(text: str, timezone: str) -> datetime | None:
@@ -169,6 +178,18 @@ def normalize(lines, *, service: str, path: str, timezone: str, source_type: str
                 r"^\s*-\s+(?:Local|Network):", body
             ):
                 level = "INFO"
+        if service == "postgresql":
+            native = re.match(r"^\s*(LOG|NOTICE|DETAIL|HINT|CONTEXT|STATEMENT):", body)
+            if native:
+                level = "INFO"
+                meta["native_level"] = native[1]
+        if service == "airflow_health":
+            if re.match(r"^\s*✅\s*\[OK\]", body) or re.match(
+                r"^\s*=+\s*Health\b", body
+            ):
+                level = "INFO"
+            elif re.match(r"^\s*(?:❌|🚨|\[(?:FAIL|FAILED|ERROR|UNHEALTHY)\])", body):
+                level = "ERROR"
         redis = REDIS_TIME.match(first_line)
         if redis:
             level = {".": "DEBUG", "-": "DEBUG", "*": "INFO", "#": "WARNING"}[redis[2]]
@@ -196,14 +217,19 @@ def normalize(lines, *, service: str, path: str, timezone: str, source_type: str
             pass
         status = HTTP.search(text)
         npm = NPM_HTTP.search(text)
-        if status or npm:
-            code = int(status[1] if status else (npm[2] or npm[4]))
+        npm_access = NPM_ACCESS.match(first_line)
+        if status or npm or npm_access:
+            code = int(
+                (npm_access["pair"] or npm_access["single"])
+                if npm_access
+                else (status[1] if status else (npm[2] or npm[4]))
+            )
             meta["http_status"] = code
             if code >= 500:
                 level = "ERROR"
             elif code >= 400:
                 level = "WARNING"
-            elif level == "UNKNOWN":
+            elif level == "UNKNOWN" or npm_access:
                 level = "INFO"
         latency = LATENCY.search(first_line)
         trailing_latency = (
