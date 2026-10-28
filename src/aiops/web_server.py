@@ -38,6 +38,13 @@ def create_web_app(*, api_url: str, token: str):
             response.headers["Cache-Control"] = "no-store"
         return response
 
+    @app.get("/favicon.ico")
+    def favicon():
+        # The project-root icon is the user's source; the wheel has a bundled fallback.
+        original = Path.cwd() / "favicon.ico"
+        return FileResponse(original if original.is_file() else ASSETS / "favicon.ico",
+                            media_type="image/x-icon", headers={"Cache-Control": "no-cache"})
+
     @app.get("/health")
     def health():
         return {"status": "ready"}

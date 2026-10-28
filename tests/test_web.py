@@ -53,3 +53,17 @@ def test_web_proxy_sanitizes_authentication_errors(web, monkeypatch):
     assert response.status_code == 401
     assert response.json() == {"error": "api_authentication"}
     assert "private-" not in response.text
+
+
+def test_favicon_uses_project_original_with_packaged_fallback(web, tmp_path, monkeypatch):
+    from aiops.web_server import ASSETS
+
+    monkeypatch.chdir(tmp_path)
+    bundled = web.get("/favicon.ico")
+    assert bundled.status_code == 200
+    assert bundled.content == (ASSETS / "favicon.ico").read_bytes()
+    assert bundled.headers["cache-control"] == "no-cache"
+    source = tmp_path / "favicon.ico"
+    source.write_bytes(bundled.content + b"source-marker")
+    assert web.get("/favicon.ico").content == source.read_bytes()
+    assert '/favicon.ico' in web.get("/").text
