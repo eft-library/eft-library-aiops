@@ -10,11 +10,18 @@ from uuid import uuid4
 from aiops.collectors.config import CollectionConfig
 from aiops.collectors.docker import DockerCollector
 from aiops.collectors.files import DirectoryCollector, FileCollector, ScanError
-from aiops.collectors.models import Batch, Coverage, Failure, TimeRange
+from aiops.collectors.models import (
+    Batch,
+    CollectionSelection,
+    Coverage,
+    Failure,
+    TimeRange,
+)
 from aiops.collectors.parse import normalize
 from aiops.collectors.redact import mask
 from aiops.collectors.store import BatchStore, collector_lock
 from aiops.collectors.system import SystemCollector
+from aiops.reporting.periods import day_for
 
 IMPORTANT = {"WARNING", "ERROR", "FATAL", "CRITICAL"}
 
@@ -26,7 +33,17 @@ def since_duration(value: str) -> timedelta:
     return timedelta(seconds=int(match[1]) * {"m": 60, "h": 3600, "d": 86400}[match[2]])
 
 
-def summarize(events, coverage, metrics, failures, config, batch_id, started, ended):
+def summarize(
+    events,
+    coverage,
+    metrics,
+    failures,
+    config,
+    batch_id,
+    started,
+    ended,
+    selection=None,
+):
     errors, http, groups = defaultdict(Counter), {}, {}
     per_service = defaultdict(list)
     for event in events:
@@ -127,6 +144,7 @@ def summarize(events, coverage, metrics, failures, config, batch_id, started, en
             start=min(timestamps, default=started), end=max(timestamps, default=ended)
         ),
         collected_at=ended,
+        selection=selection or CollectionSelection(),
         coverage=coverage,
         error_counts={
             service: dict(errors[service])
@@ -227,6 +245,7 @@ class CollectionService:
         batch_id = "batch-" + uuid4().hex
         events, checkpoints, failures, coverage = [], [], [], {}
         physical_lines, files = 0, 0
+        excluded_by_day = Counter()
         enabled = [name for name in selected if config.sources[name].enabled]
         for name in selected:
             source = config.sources[name]
@@ -300,6 +319,7 @@ class CollectionService:
                         source_type=source.type,
                     ):
                         if cutoff and event.timestamp and event.timestamp < cutoff:
+                            excluded_by_day[day_for(event.timestamp)] += 1
                             continue
                         if cutoff and event.timestamp is None:
                             warnings.append("since_unknown_timestamp_retained")
@@ -375,8 +395,14 @@ class CollectionService:
             batch_id,
             started,
             datetime.now(timezone.utc),
+            selection=CollectionSelection(
+                since_cutoff=cutoff,
+                backfill=backfill,
+                initial_tail_bytes=int(config.initial_tail_mb * 1024 * 1024),
+                excluded_by_day=dict(excluded_by_day),
+            ),
         )
-        snapshot = store.commit(batch, events, checkpoints)
+        snapshot = store.commit(batch, events, checkpoints, metrics=metrics)
         return {
             "batch_id": batch_id,
             "snapshot": str(snapshot),

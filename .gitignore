@@ -221,5 +221,9 @@ __marimo__/
 
 # AIOps runtime data, credentials and snapshots
 .aiops/
+aiops_data/
 .codex/
 auth.json
+
+# sample
+prd_logs/

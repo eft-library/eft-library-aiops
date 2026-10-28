@@ -57,6 +57,40 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
         action="store_true",
         help="Start unseen files at byte zero (still bounded)",
     )
+    report = commands.add_parser(
+        "report", help="Prepare/run versioned daily, weekly, monthly reports"
+    )
+    actions = report.add_subparsers(dest="report_action", required=True)
+    for action in ("prepare", "run"):
+        target = actions.add_parser(
+            action,
+            help="No AI call"
+            if action == "prepare"
+            else "Run actual Codex and persist result",
+        )
+        target.add_argument(
+            "--type", choices=["daily", "weekly", "monthly"], required=True
+        )
+        target.add_argument(
+            "--date",
+            help="Target calendar date; default is last closed period in Asia/Seoul",
+        )
+        target.add_argument(
+            "--config",
+            type=Path,
+            default=Path("config/log_sources.fixture.yaml"),
+            help="Expected collection sources for daily coverage",
+        )
+        target.add_argument(
+            "--interval-minutes",
+            type=int,
+            default=5,
+            help="Expected collection cadence, for coverage only",
+        )
+    listing = actions.add_parser(
+        "list", help="List report revisions and data staleness"
+    )
+    listing.add_argument("--type", choices=["daily", "weekly", "monthly"])
     args = parser.parse_args(argv)
     try:
         if args.env_file:
@@ -75,6 +109,24 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
             ).collect(args.service, since=args.since, backfill=args.backfill)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 10 if result["status"] == "partial" else 0
+        elif args.command == "report":
+            from aiops.reporting.service import ReportingService
+
+            if args.report_action == "list":
+                output = ReportingService(settings).list(args.type)
+            else:
+                output = ReportingService(
+                    settings,
+                    provider=provider or CodexProvider(settings),
+                    sources_config=args.config,
+                    interval_minutes=args.interval_minutes,
+                ).execute(args.type, args.date, analyze=args.report_action == "run")
+            print(json.dumps(output, ensure_ascii=False, indent=2))
+            return (
+                10
+                if isinstance(output, dict) and not output["coverage_complete"]
+                else 0
+            )
         else:
             # Bound the read even for unexpectedly large files; never expose paths/content in errors.
             with args.input.open("rb") as stream:

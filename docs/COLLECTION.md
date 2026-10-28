@@ -52,6 +52,7 @@ $AIOPS_DATA_DIR/collection/
 └── batches/
     └── batch-<uuid>/
         ├── snapshot.json           # AI/후속 단계용 요약과 대표 로그
+        ├── metrics.jsonl            # 전체 관측 지표
         └── events.jsonl            # 이번 수집에서 정규화·마스킹한 전체 이벤트
 ```
 
@@ -87,7 +88,7 @@ $AIOPS_DATA_DIR/collection/
 
 저장 순서는 다음과 같다.
 
-1. `.staging/<batch_id>/`에 마스킹된 두 결과 파일을 쓰고 파일·디렉터리를 fsync한다.
+1. `.staging/<batch_id>/`에 마스킹된 이벤트·스냅샷 및 전체 관측 지표 파일을 쓰고 파일·디렉터리를 fsync한다.
 2. SQLite 단일 트랜잭션에서 배치 카탈로그와 모든 성공 파일 체크포인트를 함께 확정한다.
 3. 디렉터리를 `batches/<batch_id>/`로 원자적으로 이동하고 상위 디렉터리를 fsync한다.
 
@@ -120,4 +121,4 @@ Phase 2는 호스트 CLI와 Python 서비스 경계를 제공한다. Docker 내�
 
 stdout에서 배치 ID와 스냅샷 경로만 작업 메타데이터로 전달한다. 호스트 파일 경로를 다른 컨테이너가 바로 읽을 수 있다고 가정하지 않고 후속 단계도 호스트에서 실행하거나 승인된 전용 배치 저장 경로를 공유한다. 전체 호스트 파일시스템이나 Docker socket을 Airflow에 마운트하지 않는다.
 
-실제 DAG·SSH 연결·스케줄 활성화·단일 Codex Worker·FastAPI 조회 API는 Phase 3 이후 구현한다. 현재 `collect`는 수집만 수행하므로 Airflow 수집 재시도와 AI 분석 재시도도 분리할 수 있다.
+일일 입력 통합과 주간·월간 결과 의존 관계는 [REPORTING.md](REPORTING.md)를 따른다. 실제 DAG·SSH 연결·스케줄 활성화·상시 단일 Codex Worker·FastAPI 조회 API는 Phase 3 이후 구현한다. 현재 `collect`는 수집만 수행하므로 Airflow 수집 재시도와 AI 분석 재시도도 분리할 수 있다.

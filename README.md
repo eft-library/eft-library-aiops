@@ -1,6 +1,6 @@
 # eft-library-aiops
 
-EFT Library의 로그와 서버 상태를 수집하고 Codex로 장애 원인과 개선 방향을 분석하는 Python 도구입니다. 현재 **Phase 1의 Codex 분석 연결과 Phase 2의 로그·시스템 상태 수집**을 구현했습니다. 분석 작업 관리·PostgreSQL 결과 저장·Airflow 연동과 웹 조회 API는 이후 단계에서 구현합니다.
+EFT Library의 로그와 서버 상태를 수집하고 Codex로 장애 원인과 개선 방향을 분석하는 Python 도구입니다. 현재 **Phase 1의 Codex 분석 연결과 Phase 2의 로그·시스템 상태 수집**을 구현했습니다. 일일·주간·월간 입력 통합과 버전별 보고서 저장도 지원합니다. 상시 단일 Worker·PostgreSQL 결과 저장·Airflow 연동과 웹 조회 API는 이후 단계에서 구현합니다.
 
 향후 AIOps 웹 서비스의 기본 포트는 **백엔드(FastAPI) 9023**, **프론트엔드(추가 시) 4003**으로 사용합니다. 현재 CLI 수집·분석은 서버 포트를 열지 않습니다.
 
@@ -65,7 +65,7 @@ uv run aiops --env-file .env analyze --input config/sample.json
 | 변수                    | 기본값   | 용도                                            |
 | ----------------------- | -------- | ----------------------------------------------- |
 | `AIOPS_CODEX_BIN`       | `codex`  | 기존 Codex 실행 파일 또는 절대 경로             |
-| `AIOPS_DATA_DIR`        | `.aiops` | 잠금과 실행 메타데이터 저장 경로                |
+| `AIOPS_DATA_DIR`        | `aiops_data` | 잠금과 실행 메타데이터 저장 경로                |
 | `AIOPS_TIMEOUT_SECONDS` | `600`    | Codex 실행 타임아웃(초)                         |
 | `AIOPS_MAX_INPUT_BYTES` | `100000` | JSON 입력 최대 바이트                           |
 | `AIOPS_MODEL`           | 미지정   | 계정에서 사용 가능한 모델; 미지정 시 CLI 기본값 |
@@ -73,6 +73,16 @@ uv run aiops --env-file .env analyze --input config/sample.json
 Codex 사용자 설정과 프로젝트 규칙 파일은 불러오지 않습니다. 따라서 사용자 `config.toml`에 설정한 모델·MCP·사용자 정의 Provider는 사용하지 않습니다. 모델은 필요하면 위 변수로 지정합니다. 기존 ChatGPT 로그인은 재사용하며 API 키 환경변수는 자식 프로세스에 전달하지 않습니다. 기존 CLI가 API 키 방식으로 로그인되어 있다면 그 인증이 사용되므로 `codex login status`로 확인하세요.
 
 ChatGPT 인증은 플랜의 사용량 제한을 따릅니다. API 키 로그인은 별도 API 과금 대상입니다. 계정별 한도는 고정하지 않습니다. 자세한 근거는 [Provider 결정 문서](docs/CODEX_PROVIDER.md)를 참고하세요.
+
+### 기존 숨김 데이터 폴더 이전
+
+기본 데이터 폴더는 일반 `ls`에도 표시되는 `aiops_data/`입니다. 기존 서버에서 `.aiops/`를 사용했다면 AIOps 실행을 멈춘 상태에서, `aiops_data/`가 아직 없을 때 폴더 전체를 옮깁니다.
+
+```sh
+mv .aiops aiops_data
+```
+
+`.env`에 기존 경로를 설정했다면 `AIOPS_DATA_DIR=aiops_data`로 변경합니다. 폴더 전체를 옮겨야 SQLite 체크포인트와 기존 배치를 유지하며 이어 수집할 수 있습니다. 두 폴더가 이미 모두 있다면 덮어쓰거나 임의로 합치지 않습니다. 기존 `.aiops/`와 새 `aiops_data/`는 모두 Git 제외 대상입니다.
 
 ## 로그 수집 (Phase 2)
 
@@ -94,11 +104,11 @@ uv run aiops --env-file .env collect --config config/log_sources.yaml --all
 
 운영 경로는 `config/log_sources.yaml`에서 확인·수정합니다. 현재 root 실행 환경을 지원하며, 원본 로그나 서비스 설정은 변경하지 않습니다. Docker 지표 수집은 기본 비활성입니다.
 
-첫 실행은 파일별 최근 일부만 읽고, 다음 실행은 새로 추가된 부분만 읽습니다. 새 로그가 없으면 `events: 0`도 정상입니다. 출력의 `snapshot`은 요약 JSON, `events_file`은 마스킹한 정규화 이벤트 파일입니다. 기본 저장 경로는 `.aiops/collection/`이고 체크포인트는 별도 SQLite에 저장합니다.
+첫 실행은 파일별 최근 일부만 읽고, 다음 실행은 새로 추가된 부분만 읽습니다. 새 로그가 없으면 `events: 0`도 정상입니다. 출력의 `snapshot`은 요약 JSON, `events_file`은 마스킹한 정규화 이벤트 파일입니다. 기본 저장 경로는 `aiops_data/collection/`이고 체크포인트는 별도 SQLite에 저장합니다.
 
 `status: partial`과 종료 코드 **10**은 일부 소스 실패·한도 도달·미완성 줄 보류가 있으나 배치는 저장했다는 의미입니다. `coverage`와 저장된 스냅샷의 `collection_failures`를 확인하세요.
 
-수집만 할 때는 여기까지 실행합니다. AI 분석까지 원할 때만 출력된 경로로 별도 실행합니다.
+수집만 할 때는 여기까지 실행합니다. 아래 `analyze`는 단일 배치 점검용입니다. 정기 보고서는 다음 절의 `report` 명령으로 날짜별로 묶어 분석합니다.
 
 ```sh
 uv run aiops analyze --input <출력된_snapshot.json_경로>
@@ -108,11 +118,36 @@ uv run aiops --env-file .env analyze --input <출력된_snapshot.json_경로>
 
 `--since 24h`는 이번 증분 읽기의 시간 필터이며 과거 24시간 전체를 재수집하지 않습니다. `--backfill`은 처음 보는 파일을 시작부터 읽되 기존 체크포인트는 유지합니다. 옵션·회전·중단 복구·백업·보관 정책과 Airflow 연결 설계는 [수집 안내](docs/COLLECTION.md)를 참고하세요. 마스킹은 규칙 기반이므로 처음 운영 수집한 배치의 내용을 직접 검토한 뒤 외부 분석에 사용하세요.
 
+## 일일·주간·월간 보고서
+
+한국 시간 기준으로 **일일은 전날 데이터**, **주간은 지난 월~일의 일일 보고서 7개**, **월간은 지난달의 일일 보고서 전체**를 사용합니다. 월간의 주간 보고서는 보조 참고이며 중복 합산하지 않습니다. 수집 배치 하나를 하루로 간주하지 않습니다.
+
+```sh
+# AI 호출 없이 전날의 입력과 누락 상태부터 확인
+uv run aiops --env-file .env report prepare --type daily --config config/log_sources.yaml
+
+# 전날 일일 분석 (실제 Codex 호출, 결과 저장)
+uv run aiops --env-file .env report run --type daily --config config/log_sources.yaml
+
+# 일일 보고서가 완료된 뒤 실행: 지난주 / 지난달
+uv run aiops --env-file .env report run --type weekly
+uv run aiops --env-file .env report run --type monthly
+
+# 특정 날짜 재분석 또는 입력 확인: --date 2026-10-27 추가
+uv run aiops --env-file .env report list
+```
+
+`.env`를 쓰지 않으면 `--env-file .env`만 생략합니다. `--date`를 생략하면 마지막 종료된 기간을 자동 선택합니다. 현재 진행 중인 날짜·주·월은 받지 않습니다. 수집은 짧은 간격으로 별도 실행하며, 정기 수집에는 `--since`를 붙이지 않습니다.
+
+보고서는 `aiops_data/reports/`에 저장합니다. 같은 입력의 완료된 결과는 재사용하고, 지연 로그나 하위 보고서가 바뀌면 새 버전으로 분석합니다. 누락·오래된 하위 보고서는 `coverage_complete: false`로 표시하고 종료 코드 10을 반환할 수 있습니다. `report list`의 `stale`로 갱신 필요 여부를 확인합니다.
+
+커버리지의 기본 기대 수집 주기는 5분이며 실제 주기가 다르면 `--interval-minutes`로 맞춥니다. **아직 Airflow 자동 스케줄과 상시 Worker는 설치하지 않습니다.** 기간·재실행·기존 데이터 호환·저장/복구의 상세 기준은 [정기 보고서 안내](docs/REPORTING.md)를 참고하세요.
+
 ## 결과와 오류
 
 아래는 `analyze` 명령의 결과와 오류입니다. `collect`의 저장 구조·종료 코드는 위 수집 안내를 참고하세요.
 
-분석 결과 본문은 stdout으로만 출력합니다. 보고서를 보관하려면 민감정보 제거를 확인한 뒤 Git 제외 데이터 경로에 저장하세요. `.aiops/<job_id>.json`에는 상태·오류 종류·시각·소요 시간·Provider·요청 모델·Thread ID만 기록합니다. 원문 로그·프롬프트·응답·인증 정보는 기록하지 않습니다. 모델을 미지정하면 메타데이터의 모델은 `null`이며 실제 모델을 추정하지 않습니다.
+분석 결과 본문은 stdout으로만 출력합니다. 보고서를 보관하려면 민감정보 제거를 확인한 뒤 Git 제외 데이터 경로에 저장하세요. `aiops_data/<job_id>.json`에는 상태·오류 종류·시각·소요 시간·Provider·요청 모델·Thread ID만 기록합니다. 원문 로그·프롬프트·응답·인증 정보는 기록하지 않습니다. 모델을 미지정하면 메타데이터의 모델은 `null`이며 실제 모델을 추정하지 않습니다.
 
 | 종료 코드 | 의미                                   |
 | --------- | -------------------------------------- |
@@ -138,6 +173,6 @@ uv run pytest -q
 AIOPS_RUN_INTEGRATION=1 uv run pytest -q -m integration
 ```
 
-기본 테스트는 실제 Codex·네트워크·Docker daemon 없이 실행합니다. Phase 2는 증분·회전·덮어쓰기·미완성 줄·중단 복구·마스킹·HTTP 집계와 시스템/Docker 대역도 검증합니다. 가짜 Provider, CLI 오류 코드, 입력 제한, 결과 검증, 비밀정보 미기록, 프로세스 간 잠금, 타임아웃 시 자식 프로세스 종료를 검증합니다.
+기본 테스트는 실제 Codex·네트워크·Docker daemon 없이 실행합니다. 정기 보고서는 기간 경계·윤년·지연 도착·버전 재사용·누락 전파·월간 입력 제한도 검증합니다. Phase 2는 증분·회전·덮어쓰기·미완성 줄·중단 복구·마스킹·HTTP 집계와 시스템/Docker 대역도 검증합니다. 가짜 Provider, CLI 오류 코드, 입력 제한, 결과 검증, 비밀정보 미기록, 프로세스 간 잠금, 타임아웃 시 자식 프로세스 종료를 검증합니다.
 
 [보안 및 배포 안내](docs/SECURITY.md), [입력 계약 초안](docs/BATCH_CONTRACT.md), [Phase 1](docs/PHASE1.md), [Phase 2](docs/PHASE2.md), [Phase 3](docs/PHASE3.md)를 참고하세요.

@@ -8,6 +8,7 @@
 | `batch_id` | 배치 고유 ID `batch-<uuid>`; 저장된 배치를 재분석할 때 유지 |
 | `time_range.start/end` | 포함된 이벤트·지표 시각의 최소/최대. 파싱된 시각이 전혀 없으면 수집 실행 시각 사용. 타임존 포함 |
 | `collected_at` | 배치 수집 완료 시각(UTC) |
+| `selection` | 실제 since_cutoff·backfill·최초 tail 크기·시간 필터로 제외한 날짜별 건수. 기존 배치는 기본값으로 호환 |
 | `masked` | 마스킹 규칙을 적용했음을 의미하는 true; 비밀이 완전히 없음을 보증하지 않음 |
 | `coverage` | 소스별 status(`collected/partial/failed/disabled`), 파일 수·payload 읽기 바이트·이벤트 수·경고 |
 | `error_counts` | 서비스별 WARNING/ERROR/FATAL/CRITICAL 건수. 빈 집계는 coverage와 함께 해석 |
@@ -28,3 +29,8 @@ ID 형식은 `<batch_id>:evt-<n>`, `<batch_id>:metric-<n>`이고 배치 내 유�
 `events.jsonl`은 수집·정규화·마스킹 후 시간 필터를 통과한 전체 이벤트다. 스냅샷은 기본 90,000바이트 이하로 제한한다. 정상 로그만 있는 배치, 새 로그가 없는 배치, 로그 수집이 실패하고 시스템 지표만 남은 배치도 유효하다. '오류 없음'은 `coverage`가 실제 수집 성공일 때만 해석한다.
 
 파일 체크포인트와 배치 저장은 [COLLECTION.md](COLLECTION.md)의 내구성 프로토콜을 따른다. 분석 결과·작업 상태는 이 계약과 별도로 Phase 3에서 저장하며, Codex 실패가 수집 체크포인트를 되돌리지 않는다.
+
+## 날짜별 통합과 지표 보존
+새 배치의 metrics.jsonl에는 snapshot 크기 제한 전 전체 지표를 저장한다. 일일 집계는 이벤트/지표 시각을 Asia/Seoul로 변환한 날짜별 인덱스를 사용한다. 시각이 없는 로그는 미배정으로 남기고, 지연 도착과 selection.excluded_by_day도 영향 날짜의 generation을 갱신한다. 기존 배치에 전체 지표 파일이 없으면 snapshot의 잔존 지표만 사용하고 불완전함을 표시한다.
+
+정기 분석 입력은 Batch와 별도의 기간 입력 계약(schema_version, analysis_type, period, data_quality, 입력 계보)을 사용한다. daily는 날짜 집계, weekly/monthly는 하위 report_id와 요약 결과를 사용한다. 상세 내용은 [REPORTING.md](REPORTING.md)를 따른다.

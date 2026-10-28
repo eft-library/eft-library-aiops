@@ -48,11 +48,19 @@ class TimeRange(Model):
     end: AwareDatetime
 
 
+class CollectionSelection(Model):
+    since_cutoff: AwareDatetime | None = None
+    backfill: bool = False
+    initial_tail_bytes: int = 1048576
+    excluded_by_day: dict[str, int] = Field(default_factory=dict)
+
+
 class Batch(Model):
     schema_version: Literal[1] = 1
     batch_id: str
     time_range: TimeRange
     collected_at: AwareDatetime
+    selection: CollectionSelection = Field(default_factory=CollectionSelection)
     masked: Literal[True] = True
     coverage: dict[str, Coverage]
     error_counts: dict[str, dict[str, int]]

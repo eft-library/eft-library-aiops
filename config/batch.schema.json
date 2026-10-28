@@ -1,5 +1,42 @@
 {
   "$defs": {
+    "CollectionSelection": {
+      "additionalProperties": false,
+      "properties": {
+        "since_cutoff": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Since Cutoff"
+        },
+        "backfill": {
+          "default": false,
+          "title": "Backfill",
+          "type": "boolean"
+        },
+        "initial_tail_bytes": {
+          "default": 1048576,
+          "title": "Initial Tail Bytes",
+          "type": "integer"
+        },
+        "excluded_by_day": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Excluded By Day",
+          "type": "object"
+        }
+      },
+      "title": "CollectionSelection",
+      "type": "object"
+    },
     "Coverage": {
       "additionalProperties": false,
       "properties": {
@@ -228,6 +265,9 @@
       "format": "date-time",
       "title": "Collected At",
       "type": "string"
+    },
+    "selection": {
+      "$ref": "#/$defs/CollectionSelection"
     },
     "masked": {
       "const": true,

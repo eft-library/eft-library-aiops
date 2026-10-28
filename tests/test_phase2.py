@@ -250,6 +250,8 @@ def test_since_filters_only_new_records_and_keeps_unknown_timestamps(tmp_path):
     result = service.collect(since="24h")
     assert len(records(result)) == 2
     assert any(event["timestamp"] is None for event in records(result))
+    assert sum(snapshot(result).selection.excluded_by_day.values()) == 1
+    assert snapshot(result).selection.since_cutoff is not None
     assert not records(service.collect())
 
 
@@ -332,11 +334,11 @@ def test_crash_before_checkpoint_commit_recovers_without_duplicate_batch(
     _, _, service = setup(tmp_path)
     original = BatchStore.commit
 
-    def crash(self, batch, events, checkpoints):
+    def crash(self, batch, events, checkpoints, **kwargs):
         def fail():
             raise RuntimeError("simulated crash")
 
-        return original(self, batch, events, checkpoints, before_commit=fail)
+        return original(self, batch, events, checkpoints, before_commit=fail, **kwargs)
 
     monkeypatch.setattr(BatchStore, "commit", crash)
     with pytest.raises(RuntimeError):
