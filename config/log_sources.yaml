@@ -18,10 +18,16 @@ system:
   enabled: true
   disks: ['/']
 docker:
-  enabled: false
-  # Opt-in only: replace with actual service container names (exclude init containers).
-  containers: []
-  timeout_seconds: 5
+  enabled: true
+  # Container state and resource metrics; stdout/stderr logs are not collected here.
+  containers:
+    - rustfs
+    - airflow-airflow-apiserver-1
+    - airflow-airflow-scheduler-1
+    - airflow-airflow-dag-processor-1
+    - airflow-airflow-triggerer-1
+    - npm
+  timeout_seconds: 10
 sources:
   nextjs:
     type: file
