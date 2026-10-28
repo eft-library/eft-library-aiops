@@ -245,7 +245,9 @@ def submit(
     ).execute(kind, date)
     snapshot = json.loads(Path(prepared["input"]).read_text())
     if not snapshot.get("source_batch_count", 0) and not snapshot.get("daily_reports"):
-        raise ValueError(
+        from aiops.operations import NoReportInput
+
+        raise NoReportInput(
             "no collected input or completed daily reports for this period"
         )
     queue = JobQueue(settings)

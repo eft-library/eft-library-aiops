@@ -740,3 +740,51 @@ def test_legacy_upgrade_collision_rolls_back_without_overwriting(pg_setup):
             ).fetchone()[0]
             is None
         )
+
+
+def test_simple_flow_setup_collect_status_and_registration_recovery(
+    pg_setup, monkeypatch, capsys
+):
+    from aiops.storage import import_sqlite as imports
+
+    settings, _, config = pg_setup
+    monkeypatch.setenv("AIOPS_DATA_DIR", str(settings.data_dir))
+    monkeypatch.setenv("AIOPS_DATABASE_URL", settings.database_url)
+    monkeypatch.setenv("AIOPS_SOURCES_CONFIG", str(config))
+    # Repeated setup is safe and needs no separate import or sync commands.
+    assert main(["setup"]) == 0
+    assert main(["setup"]) == 0
+    capsys.readouterr()
+    real_sync = imports.sync_batches
+
+    def unavailable(settings):
+        raise psycopg.OperationalError("private server details")
+
+    monkeypatch.setattr(imports, "sync_batches", unavailable)
+    assert main(["collect", "--all"]) == 11
+    failed = capsys.readouterr().out
+    assert "private server details" not in failed
+    first = json.loads(failed)
+    assert first["database_registration"]["status"] == "pending"
+    assert Path(first["snapshot"]).is_file()
+    monkeypatch.setattr(imports, "sync_batches", real_sync)
+    # A later collection catches up both the old and the new durable batches.
+    assert main(["collect", "--all"]) in (0, 10)
+    collected = json.loads(capsys.readouterr().out)
+    assert collected["database_registration"]["registered"] == 2
+    assert main(["status"]) == 0
+    overview = json.loads(capsys.readouterr().out)
+    assert overview["collection"]["batches"] == 2
+    assert overview["registered_batches"] == 2
+
+
+def test_missing_report_input_has_actionable_safe_error(pg_setup, monkeypatch, capsys):
+    settings, _, config = pg_setup
+    monkeypatch.setenv("AIOPS_DATA_DIR", str(settings.data_dir))
+    monkeypatch.setenv("AIOPS_DATABASE_URL", settings.database_url)
+    monkeypatch.setenv("AIOPS_SOURCES_CONFIG", str(config))
+    assert main(["report", "run", "--type", "daily", "--date", "2020-01-01"]) == 2
+    error = json.loads(capsys.readouterr().err)
+    assert error["error"] == "no_report_input"
+    assert "전날" in error["message"]
+    assert settings.database_url not in error["message"]

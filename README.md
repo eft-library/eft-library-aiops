@@ -23,31 +23,31 @@ uv sync --locked
 
 모든 명령은 프로젝트 최상위 폴더(`eft-library-aiops/`)에서 실행합니다. `uv run`을 사용하므로 가상환경을 따로 활성화할 필요는 없습니다.
 
-### 처음 실행하는 순서
+### 운영 실행 흐름
 
-1. 환경과 Codex 로그인 상태를 확인합니다.
-
-   ```sh
-   uv run aiops doctor
-   ```
-
-   오류 없이 `authentication`이 `configured`로 출력되면 다음 단계로 진행합니다. 오류가 발생하면 먼저 설치·로그인 상태를 확인합니다.
-
-2. 샘플 JSON을 분석합니다.
-
-   ```sh
-   uv run aiops analyze --input config/sample.json
-   ```
-
-   실제 Codex를 호출합니다. 완료되면 작업 ID(`job_id`), Thread ID(`thread_id`), 분석 결과(`report`)가 출력됩니다. 기본 제한 시간은 10분입니다.
-
-`doctor`는 최초 실행이나 환경·인증 문제를 확인할 때 사용하면 됩니다. 이후에는 분석 명령만 실행해도 됩니다.
+`.env`에 DB 접속 정보와 `AIOPS_SOURCES_CONFIG=config/log_sources.yaml`을 설정합니다. 기존 계정·비밀번호와 데이터 경로는 유지합니다.
 
 ```sh
-uv run aiops analyze --input config/sample.json
+# 최초 준비: 테이블 초기화 + 기존 보고서 이전 + 배치 등록 (재실행 가능)
+uv run aiops --env-file .env setup
+
+# 수집: Codex 호출 없이 파일 저장 + DB 메타데이터 자동 등록
+uv run aiops --env-file .env collect --all
+
+# 전날 일일 분석 요청: 입력 준비 + 작업 등록
+uv run aiops --env-file .env report run --type daily
+
+# 수집 경로·최근 수집 시각·DB·최근 작업과 오류 확인
+uv run aiops --env-file .env status
 ```
 
-`doctor`는 설치 버전과 로컬 로그인 상태만 점검합니다. 토큰 유효성·원격 연결·사용량 잔여분까지 보장하지 않습니다. `analyze`는 실제 Codex를 호출하고 작업 ID, Thread ID, 검증된 분석 JSON을 출력합니다. 입력은 UTF-8 JSON이고 기본 상한은 100,000바이트입니다. **`analyze` 자체는 자동 마스킹하지 않습니다. 준비된 샘플 또는 Phase 2가 마스킹한 스냅샷을 사용합니다.**
+Worker는 [서비스 등록 안내](docs/POSTGRES_WORKER.md#6-상시-worker)에 따라 한 번 등록해 상시 실행합니다. 서비스를 등록하기 전 수동 검증에서는 `uv run aiops --env-file .env worker --once`로 작업 한 개를 처리할 수 있습니다. **실제 Codex 호출은 Worker에서 발생합니다.** `report run` 성공은 작업 접수이며 분석 완료는 `status`에서 확인합니다. DB 없는 로컬 모드의 `report run`은 직접 Codex를 호출합니다.
+
+Airflow는 수집 명령과 일일·주간·월간 `report run --type daily|weekly|monthly`를 각각의 주기로 호출하면 됩니다. 별도 `sync-batches`, `jobs submit`, `report prepare`는 필요 없습니다. 큐 접수와 분석 완료는 별개이므로 상위 보고서는 하위 일일 분석이 완료된 뒤 요청합니다. 자동 DAG는 아직 제공하지 않습니다.
+
+수집 파일은 DB 등록에 실패해도 보존되며 다음 수집 시 누락된 등록을 자동 재시도합니다. 이 경우 종료 코드는 11입니다. 부분 수집은 10이며 결과의 coverage를 확인합니다. `status`에 배치가 없으면 데이터 경로와 수집 여부를 확인합니다. 전날 데이터가 없을 때는 분석 요청이 `no_report_input`으로 거부됩니다. `--date YYYY-MM-DD`로 다른 대상 날짜를 지정할 수 있습니다.
+
+`db`, `jobs`, `report prepare` 세부 명령은 진단·복구용으로 유지합니다. Codex 설치·로그인 점검은 `doctor`, 샘플 연결 검증은 `analyze --input config/sample.json`을 사용합니다.
 
 ### .env를 사용하는 경우 (선택)
 
@@ -160,32 +160,26 @@ uv run aiops --env-file .env report list
 
 ## PostgreSQL와 단일 Worker (Phase 3)
 
-PostgreSQL 테이블은 **public 스키마의 aiops_ 접두사**를 사용합니다. DB를 이미 만들었다면 .env의 dbname을 확인한 뒤 `db init`을 실행하면 됩니다. 기존 aiops 스키마 설치도 데이터를 유지하며 public으로 이전합니다. 정상 점검 결과는 `schema: public`, `migration: 2`입니다.
+PostgreSQL 테이블은 **public 스키마의 aiops_ 접두사**를 사용합니다. DB를 이미 만들었다면 .env의 dbname을 확인한 뒤 `setup`을 실행하면 됩니다. 기존 aiops 스키마 설치도 데이터를 유지하며 public으로 이전합니다. 정상 점검 결과는 `schema: public`, `migration: 2`입니다.
 
-서버 최초 적용은 [PostgreSQL·Worker 안내](docs/POSTGRES_WORKER.md)의 **DB/역할 생성 → .env 설정 → db init → 기존 이력 이전 → 단일 작업 검증** 순서를 따릅니다. 스키마는 [생성 SQL](src/aiops/storage/sql/001_initial.sql)로 준비했으며 운영 DB에 자동 적용하지 않습니다.
+서버 최초 적용은 [PostgreSQL·Worker 안내](docs/POSTGRES_WORKER.md)의 **DB/역할 준비 → .env 설정 → setup → Worker 서비스 등록** 순서를 따릅니다. 스키마는 [생성 SQL](src/aiops/storage/sql/001_initial.sql)로 준비했으며 운영 DB에 자동 적용하지 않습니다.
 
 ```dotenv
 # .env에 추가. 실제 DB 비밀번호를 사용하고 이 파일은 Git에 넣지 않습니다.
 AIOPS_DATABASE_URL="host=127.0.0.1 port=13245 dbname=aiops user=aiops_app"
 PGPASSWORD="DB_비밀번호"
+AIOPS_SOURCES_CONFIG=config/log_sources.yaml
 ```
 
 ```sh
 uv sync --locked
-uv run aiops --env-file .env db init
-uv run aiops --env-file .env db doctor
-uv run aiops --env-file .env db import-sqlite
-uv run aiops --env-file .env db sync-batches
-
-# 실제 데이터가 있는 종료된 날짜로 지정
-uv run aiops --env-file .env jobs submit --type daily --date YYYY-MM-DD --config config/log_sources.yaml
-uv run aiops --env-file .env jobs list
-uv run aiops --env-file .env worker --once
+uv run aiops --env-file .env setup
+uv run aiops --env-file .env status
 ```
 
-DB 모드의 `report run`은 즉시 AI 실행 대신 **큐에 등록**합니다. 실제 Codex 호출은 `worker --once` 또는 상시 `worker`에서 수행합니다. 같은 입력의 작업은 중복 등록하지 않으며 완료 결과를 재사용합니다. 요청 당시 모델을 유지하고, 인증·사용량 제한은 자동 반복하지 않습니다. 데이터가 오래되면 분석 대신 `CANCELLED/stale_input`으로 남기므로 해당 기간을 다시 submit합니다.
+DB 모드의 `report run`은 즉시 AI 실행 대신 **큐에 등록**합니다. 실제 Codex 호출은 `worker --once` 또는 상시 `worker`에서 수행합니다. 같은 입력의 작업은 중복 등록하지 않으며 완료 결과를 재사용합니다. 요청 당시 모델을 유지하고, 인증·사용량 제한은 자동 반복하지 않습니다. 데이터가 오래되면 분석 대신 `CANCELLED/stale_input`으로 남기므로 해당 기간의 `report run`을 다시 실행합니다.
 
-`collect`는 여전히 PostgreSQL과 독립적으로 동작합니다. AIOPS_DATABASE_URL을 설정하지 않으면 기존 로컬 SQLite 보고서 모드가 유지됩니다. DB 오류 종료 코드는 **11**이며 연결값과 서버 오류 원문을 출력하지 않습니다. [systemd 예제](deploy/eft-aiops-worker.service)는 경로/PATH 확인 후 운영자가 등록합니다. 아직 Airflow DAG나 API 서버를 실행하지 않습니다.
+`collect`는 파일 저장을 마친 뒤 PostgreSQL이 설정되어 있으면 배치 정보를 자동 등록합니다. DB 등록이 실패해도 수집 파일은 보존됩니다. AIOPS_DATABASE_URL을 설정하지 않으면 기존 로컬 SQLite 보고서 모드가 유지됩니다. DB 오류 종료 코드는 **11**이며 연결값과 서버 오류 원문을 출력하지 않습니다. [systemd 예제](deploy/eft-aiops-worker.service)는 경로/PATH 확인 후 운영자가 등록합니다. 아직 Airflow DAG나 API 서버를 실행하지 않습니다.
 
 ## 결과와 오류
 

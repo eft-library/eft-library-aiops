@@ -2,6 +2,28 @@
 
 운영에서는 전용 DB를 다시 만든 상태다. 아래 명령으로 최신 테이블을 초기화한 뒤 Worker를 검증한다. 현재 구현은 로컬의 실제 PostgreSQL 17과 가짜 AI Provider로 검증했다. 기존 서비스 테이블·설정·방화벽을 바꾸지 않는다.
 
+## 일반 운영에서 사용할 명령
+
+`.env`에 `AIOPS_SOURCES_CONFIG=config/log_sources.yaml`을 한 번 설정한다.
+
+```sh
+# 최초 한 번. 테이블 초기화·기존 이력 이전·배치 등록을 통합한다.
+uv run aiops --env-file .env setup
+
+# 정기 수집. DB 등록도 자동으로 처리한다.
+uv run aiops --env-file .env collect --all
+
+# 일일 분석 요청. 상시 실행 Worker가 처리한다.
+uv run aiops --env-file .env report run --type daily
+
+# 수집 상태·DB·최근 작업 확인
+uv run aiops --env-file .env status
+```
+
+Worker 서비스는 아래 systemd 안내로 한 번 등록한다. 서비스 등록 전 수동 검증에만 `worker --once`를 사용한다. 주간·월간은 `report run --type weekly`와 `report run --type monthly`를 사용한다. 하위 일일 분석이 완료된 후 요청한다. `report run`은 작업 접수이며 완료 상태는 `status`에서 확인한다. 기본 일일 대상은 한국 시간 기준 전날이다.
+
+수집 후 DB 장애 시 파일은 유지하고 종료 코드 11을 반환하며, 다음 수집에서 미등록 배치를 자동 재등록한다. 아래의 세부 DB·큐 명령은 수동 진단과 복구 절차이며 일반 운영 시 전부 실행하는 순서가 아니다.
+
 ## 구성
 
 ```text
@@ -19,17 +41,13 @@ jobs submit    → PostgreSQL 작업 큐
 
 ## 이미 DB를 다시 만든 현재 운영 환경
 
-운영 DB 이름이 `aiops`라면 기존 .env의 접속 계정·비밀번호는 유지하고 `dbname=aiops`만 확인한다. DB를 이미 만들었으므로 create_database.sql은 다시 실행하지 않는다. 최신 코드를 반영한 뒤 아래를 실행한다.
+기존 .env의 접속 계정·비밀번호를 유지하고 `dbname=aiops`와 `AIOPS_SOURCES_CONFIG=config/log_sources.yaml`을 확인한다. DB를 이미 만들었으므로 create_database.sql은 다시 실행하지 않는다. 최신 코드를 반영한 뒤 `uv sync --locked`, `uv run aiops --env-file .env setup`을 실행하면 준비가 끝난다.
 
-```sh
-uv sync --locked
-uv run aiops --env-file .env db init
-uv run aiops --env-file .env db doctor
-```
+setup 결과 database 항목의 정상 기준은 `schema: public`, `migration: 2`다. 새 DB에는 public.aiops_* 7개 테이블이 생성된다. 실행 계정에 public의 CREATE 권한이 필요하다. DB 소유 계정이면 기본적으로 가능하며, 다른 계정을 사용한다면 관리자가 해당 계정에 public의 USAGE/CREATE 권한을 부여해야 한다.
 
-정상 결과는 `schema: public`, `migration: 2`다. 새 DB에는 public.aiops_* 7개 테이블이 생성된다. 실행 계정에 public의 CREATE 권한이 필요하다. DB 소유 계정이면 기본적으로 가능하며, 다른 계정을 사용한다면 관리자가 해당 계정에 public의 USAGE/CREATE 권한을 부여해야 한다.
+이전 버전의 aiops 스키마가 남아 있다면 setup이 테이블·데이터·참조·identity sequence를 보존하며 public.aiops_*로 이동한다. 이름 충돌 또는 불완전한 구성이 있으면 트랜잭션을 중단한다. 비어 있는 이전 스키마만 제거하며, 다른 객체가 남아 있으면 유지한다. 기존 public의 다른 테이블은 변경하지 않는다.
 
-이전 버전의 aiops 스키마가 남아 있다면 같은 init이 [이전 SQL](../src/aiops/storage/sql/002_move_to_public.sql)로 테이블·데이터·참조·identity sequence를 보존하며 public.aiops_*로 이동한다. 이름 충돌 또는 불완전한 구성이 있으면 트랜잭션을 중단한다. 비어 있는 이전 스키마만 제거하며, 다른 객체가 남아 있으면 유지한다. 기존 public의 다른 테이블은 변경하지 않는다.
+아래는 계정 준비, 수동 진단·복구와 Worker 서비스 등록의 상세 안내다.
 
 ## 1. 서버에서 전용 DB와 접속 계정 준비
 
@@ -50,6 +68,7 @@ runuser -u postgres -- /usr/pgsql-17/bin/psql -p 13245 -d postgres \
 ```dotenv
 AIOPS_DATABASE_URL="host=127.0.0.1 port=13245 dbname=aiops user=aiops_app"
 PGPASSWORD="위에서_설정한_DB_비밀번호"
+AIOPS_SOURCES_CONFIG=config/log_sources.yaml
 ```
 
 비밀번호는 libpq의 PGPASSWORD로 읽는다. URL 안에 넣지 않아 URL 인코딩이 필요하지 않다. 비밀번호를 별도 파일에 두려면 libpq의 PGPASSFILE을 사용할 수 있으며 해당 파일은 600으로 제한하고 Git에서 제외한다. AIOPS_DATABASE_URL도 password 필드를 포함할 수 있으므로 프로그램은 값과 서버 오류 원문을 출력하지 않는다. Codex 자식 프로세스에는 DB URL·PGPASSWORD·PGPASSFILE을 전달하지 않는다.

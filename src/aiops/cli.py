@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -8,6 +9,7 @@ import psycopg
 from dotenv import load_dotenv
 
 from aiops.config import Settings
+from aiops.operations import NoReportInput
 from aiops.providers.base import AIProvider, AnalysisRequest, ErrorKind, ProviderError
 from aiops.providers.codex import CodexProvider, doctor
 
@@ -30,6 +32,8 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
         "--env-file", type=Path, help="Explicit dotenv file (existing environment wins)"
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("setup", help="Initialize DB and register existing local data")
+    commands.add_parser("status", help="Show collection, database and recent jobs")
     commands.add_parser("doctor", help="Check local Python, Codex and login status")
     analyze = commands.add_parser(
         "analyze", help="Analyze a sanitized sample (real Codex call)"
@@ -48,8 +52,8 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
     collect.add_argument(
         "--config",
         type=Path,
-        default=Path("config/log_sources.fixture.yaml"),
-        help="YAML profile; defaults to local fixtures",
+        default=None,
+        help="YAML profile; otherwise AIOPS_SOURCES_CONFIG or local fixtures",
     )
     collect.add_argument(
         "--since", help="Filter newly read timestamps, e.g. 24h (not a historical seek)"
@@ -68,7 +72,7 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
             action,
             help="No AI call"
             if action == "prepare"
-            else "Run actual Codex and persist result",
+            else "Queue analysis for the Worker (local mode runs Codex directly)",
         )
         target.add_argument(
             "--type", choices=["daily", "weekly", "monthly"], required=True
@@ -80,7 +84,7 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
         target.add_argument(
             "--config",
             type=Path,
-            default=Path("config/log_sources.fixture.yaml"),
+            default=None,
             help="Expected collection sources for daily coverage",
         )
         target.add_argument(
@@ -106,7 +110,7 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
     )
     job_submit.add_argument("--date")
     job_submit.add_argument(
-        "--config", type=Path, default=Path("config/log_sources.fixture.yaml")
+        "--config", type=Path, default=None
     )
     job_submit.add_argument("--interval-minutes", type=int, default=5)
     job_submit.add_argument(
@@ -129,7 +133,19 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
                 raise ProviderError(ErrorKind.CONFIG)
             load_dotenv(args.env_file, override=False)
         settings = Settings.from_env()
-        if args.command == "db":
+        if hasattr(args, "config") and args.config is None:
+            args.config = Path(os.getenv(
+                "AIOPS_SOURCES_CONFIG", "config/log_sources.fixture.yaml"
+            ))
+        if args.command == "setup":
+            from aiops.operations import setup
+
+            output = setup(settings)
+        elif args.command == "status":
+            from aiops.operations import status
+
+            output = status(settings)
+        elif args.command == "db":
             from aiops.storage import postgres
 
             if args.db_action == "print-sql":
@@ -188,7 +204,21 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
             result = CollectionService(
                 load_config(args.config), settings.data_dir
             ).collect(args.service, since=args.since, backfill=args.backfill)
+            registration_failed = False
+            if settings.database_url:
+                from aiops.storage.import_sqlite import sync_batches
+
+                try:
+                    result["database_registration"] = sync_batches(settings)
+                except (psycopg.Error, OSError, ValueError, sqlite3.Error, ProviderError):
+                    registration_failed = True
+                    result["database_registration"] = {
+                        "status": "pending",
+                        "message": "수집 파일은 저장되었습니다. DB 등록은 다음 수집 시 자동 재시도됩니다. DB 연결과 aiops setup 실행 여부를 확인하세요.",
+                    }
             print(json.dumps(result, ensure_ascii=False, indent=2))
+            if registration_failed:
+                return 11
             return 10 if result["status"] == "partial" else 0
         elif args.command == "report":
             from aiops.reporting.service import ReportingService
@@ -235,6 +265,12 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
             )
         print(json.dumps(output, ensure_ascii=False, indent=2))
         return 0
+    except NoReportInput:
+        print(json.dumps({
+            "error": "no_report_input",
+            "message": "대상 기간에 수집 데이터 또는 완료된 일일 보고서가 없습니다. aiops status로 데이터 경로와 수집 상태를 확인하세요. 일일 분석 기본 대상은 한국 시간 기준 전날입니다.",
+        }, ensure_ascii=False), file=sys.stderr)
+        return 2
     except ProviderError as exc:
         print(json.dumps({"error": exc.kind.value}), file=sys.stderr)
         return EXIT_CODES[exc.kind]
