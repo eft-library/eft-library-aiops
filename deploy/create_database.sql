@@ -4,4 +4,4 @@
 CREATE ROLE aiops_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE;
 SET password_encryption = 'scram-sha-256';
 \password aiops_app
-CREATE DATABASE eft_library_aiops OWNER aiops_app;
+CREATE DATABASE aiops OWNER aiops_app;

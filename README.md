@@ -160,11 +160,13 @@ uv run aiops --env-file .env report list
 
 ## PostgreSQL와 단일 Worker (Phase 3)
 
+PostgreSQL 테이블은 **public 스키마의 aiops_ 접두사**를 사용합니다. DB를 이미 만들었다면 .env의 dbname을 확인한 뒤 `db init`을 실행하면 됩니다. 기존 aiops 스키마 설치도 데이터를 유지하며 public으로 이전합니다. 정상 점검 결과는 `schema: public`, `migration: 2`입니다.
+
 서버 최초 적용은 [PostgreSQL·Worker 안내](docs/POSTGRES_WORKER.md)의 **DB/역할 생성 → .env 설정 → db init → 기존 이력 이전 → 단일 작업 검증** 순서를 따릅니다. 스키마는 [생성 SQL](src/aiops/storage/sql/001_initial.sql)로 준비했으며 운영 DB에 자동 적용하지 않습니다.
 
 ```dotenv
 # .env에 추가. 실제 DB 비밀번호를 사용하고 이 파일은 Git에 넣지 않습니다.
-AIOPS_DATABASE_URL="host=127.0.0.1 port=13245 dbname=eft_library_aiops user=aiops_app"
+AIOPS_DATABASE_URL="host=127.0.0.1 port=13245 dbname=aiops user=aiops_app"
 PGPASSWORD="DB_비밀번호"
 ```
 

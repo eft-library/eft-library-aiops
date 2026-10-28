@@ -39,18 +39,18 @@ class JobQueue:
             raise ValueError("invalid job policy")
         with self.db.transaction():
             version = self.db.execute(
-                "SELECT status FROM aiops.report_versions WHERE report_id=%s FOR UPDATE",
+                "SELECT status FROM public.aiops_report_versions WHERE report_id=%s FOR UPDATE",
                 (report_id,),
             ).fetchone()
             if not version:
                 raise ValueError("unknown report")
             status = "COMPLETED" if version["status"] == "COMPLETED" else "PENDING"
             self.db.execute(
-                """INSERT INTO aiops.analysis_jobs
+                """INSERT INTO public.aiops_analysis_jobs
                 (job_id,report_id,priority,status,max_attempts,finished_at)
                 VALUES (%s,%s,%s,%s,%s,CASE WHEN %s='COMPLETED' THEN now() END)
-                ON CONFLICT(report_id) DO UPDATE SET priority=CASE WHEN analysis_jobs.status='PENDING'
-                    THEN LEAST(analysis_jobs.priority,EXCLUDED.priority) ELSE analysis_jobs.priority END""",
+                ON CONFLICT(report_id) DO UPDATE SET priority=CASE WHEN aiops_analysis_jobs.status='PENDING'
+                    THEN LEAST(aiops_analysis_jobs.priority,EXCLUDED.priority) ELSE aiops_analysis_jobs.priority END""",
                 (
                     uuid4(),
                     report_id,
@@ -61,7 +61,8 @@ class JobQueue:
                 ),
             )
             row = self.db.execute(
-                "SELECT * FROM aiops.analysis_jobs WHERE report_id=%s", (report_id,)
+                "SELECT * FROM public.aiops_analysis_jobs WHERE report_id=%s",
+                (report_id,),
             ).fetchone()
         return public_job(row)
 
@@ -69,28 +70,28 @@ class JobQueue:
         return [
             public_job(row)
             for row in self.db.execute(
-                "SELECT * FROM aiops.analysis_jobs ORDER BY requested_at DESC LIMIT %s",
+                "SELECT * FROM public.aiops_analysis_jobs ORDER BY requested_at DESC LIMIT %s",
                 (limit,),
             )
         ]
 
     def claim(self, worker_id):
         with self.db.transaction():
-            row = self.db.execute("""SELECT * FROM aiops.analysis_jobs WHERE status='PENDING' AND available_at<=now()
+            row = self.db.execute("""SELECT * FROM public.aiops_analysis_jobs WHERE status='PENDING' AND available_at<=now()
                 ORDER BY priority,requested_at,job_id FOR UPDATE SKIP LOCKED LIMIT 1""").fetchone()
             if not row:
                 return None
             row = self.db.execute(
-                """UPDATE aiops.analysis_jobs SET status='RUNNING',attempt_count=attempt_count+1,
+                """UPDATE public.aiops_analysis_jobs SET status='RUNNING',attempt_count=attempt_count+1,
                 worker_id=%s,started_at=now(),finished_at=NULL WHERE job_id=%s RETURNING *""",
                 (worker_id, row["job_id"]),
             ).fetchone()
             self.db.execute(
-                "UPDATE aiops.report_versions SET status='RUNNING',error=NULL WHERE report_id=%s",
+                "UPDATE public.aiops_report_versions SET status='RUNNING',error=NULL WHERE report_id=%s",
                 (row["report_id"],),
             )
             self.db.execute(
-                "INSERT INTO aiops.job_attempts(job_id,attempt,worker_id,status) VALUES (%s,%s,%s,'RUNNING')",
+                "INSERT INTO public.aiops_job_attempts(job_id,attempt,worker_id,status) VALUES (%s,%s,%s,'RUNNING')",
                 (row["job_id"], row["attempt_count"], worker_id),
             )
         return row
@@ -98,7 +99,7 @@ class JobQueue:
     def finish(self, job, worker_id, *, result=None, error=None):
         with self.db.transaction():
             current = self.db.execute(
-                "SELECT * FROM aiops.analysis_jobs WHERE job_id=%s FOR UPDATE",
+                "SELECT * FROM public.aiops_analysis_jobs WHERE job_id=%s FOR UPDATE",
                 (job["job_id"],),
             ).fetchone()
             if current["status"] != "RUNNING" or current["worker_id"] != worker_id:
@@ -121,7 +122,7 @@ class JobQueue:
                 status = "TIMEOUT" if error == "timeout" else "FAILED"
                 version_status, delay = "FAILED", 0
             self.db.execute(
-                """UPDATE aiops.analysis_jobs SET status=%s,error=%s,
+                """UPDATE public.aiops_analysis_jobs SET status=%s,error=%s,
                 available_at=now()+(%s * interval '1 second'), finished_at=CASE WHEN %s='PENDING' THEN NULL ELSE now() END,
                 worker_id=NULL WHERE job_id=%s""",
                 (status, error, delay, status, job["job_id"]),
@@ -136,7 +137,7 @@ class JobQueue:
                 )
             )
             self.db.execute(
-                """UPDATE aiops.job_attempts SET status=%s,error=%s,finished_at=now(),provider_job_id=%s,thread_id=%s
+                """UPDATE public.aiops_job_attempts SET status=%s,error=%s,finished_at=now(),provider_job_id=%s,thread_id=%s
                 WHERE job_id=%s AND attempt=%s""",
                 (
                     attempt_status,
@@ -150,15 +151,15 @@ class JobQueue:
             # Busy isn't a Codex attempt. Remove the placeholder attempt before reusing its number.
             if error == "busy":
                 self.db.execute(
-                    "DELETE FROM aiops.job_attempts WHERE job_id=%s AND attempt=%s",
+                    "DELETE FROM public.aiops_job_attempts WHERE job_id=%s AND attempt=%s",
                     (job["job_id"], current["attempt_count"]),
                 )
                 self.db.execute(
-                    "UPDATE aiops.analysis_jobs SET attempt_count=attempt_count-1 WHERE job_id=%s",
+                    "UPDATE public.aiops_analysis_jobs SET attempt_count=attempt_count-1 WHERE job_id=%s",
                     (job["job_id"],),
                 )
             self.db.execute(
-                """UPDATE aiops.report_versions SET status=%s,error=%s,result_json=%s,
+                """UPDATE public.aiops_report_versions SET status=%s,error=%s,result_json=%s,
                 completed_at=CASE WHEN %s='COMPLETED' THEN now() ELSE NULL END WHERE report_id=%s""",
                 (
                     version_status,
@@ -169,13 +170,14 @@ class JobQueue:
                 ),
             )
             row = self.db.execute(
-                "SELECT * FROM aiops.analysis_jobs WHERE job_id=%s", (job["job_id"],)
+                "SELECT * FROM public.aiops_analysis_jobs WHERE job_id=%s",
+                (job["job_id"],),
             ).fetchone()
         return public_job(row)
 
     def recover(self):
         jobs = self.db.execute(
-            "SELECT * FROM aiops.analysis_jobs WHERE status='RUNNING'"
+            "SELECT * FROM public.aiops_analysis_jobs WHERE status='RUNNING'"
         ).fetchall()
         for job in jobs:
             self.finish(job, job["worker_id"], error="interrupted")
@@ -185,7 +187,7 @@ class JobQueue:
         job_id = UUID(job_id)
         with self.db.transaction():
             job = self.db.execute(
-                "SELECT * FROM aiops.analysis_jobs WHERE job_id=%s FOR UPDATE",
+                "SELECT * FROM public.aiops_analysis_jobs WHERE job_id=%s FOR UPDATE",
                 (job_id,),
             ).fetchone()
             if (
@@ -195,17 +197,18 @@ class JobQueue:
             ):
                 raise ValueError("only terminal failed jobs can be retried")
             self.db.execute(
-                """UPDATE aiops.analysis_jobs SET status='PENDING',error=NULL,available_at=now(),
+                """UPDATE public.aiops_analysis_jobs SET status='PENDING',error=NULL,available_at=now(),
                 finished_at=NULL,worker_id=NULL,max_attempts=%s WHERE job_id=%s""",
                 (min(100, job["attempt_count"] + 3), job_id),
             )
             self.db.execute(
-                "UPDATE aiops.report_versions SET status='PREPARED',error=NULL WHERE report_id=%s",
+                "UPDATE public.aiops_report_versions SET status='PREPARED',error=NULL WHERE report_id=%s",
                 (job["report_id"],),
             )
             return public_job(
                 self.db.execute(
-                    "SELECT * FROM aiops.analysis_jobs WHERE job_id=%s", (job_id,)
+                    "SELECT * FROM public.aiops_analysis_jobs WHERE job_id=%s",
+                    (job_id,),
                 ).fetchone()
             )
 
@@ -213,13 +216,13 @@ class JobQueue:
         job_id = UUID(job_id)
         with self.db.transaction():
             row = self.db.execute(
-                "UPDATE aiops.analysis_jobs SET status='CANCELLED',finished_at=now(),error='cancelled' WHERE job_id=%s AND status='PENDING' RETURNING *",
+                "UPDATE public.aiops_analysis_jobs SET status='CANCELLED',finished_at=now(),error='cancelled' WHERE job_id=%s AND status='PENDING' RETURNING *",
                 (job_id,),
             ).fetchone()
             if not row:
                 raise ValueError("only pending jobs can be cancelled")
             self.db.execute(
-                "UPDATE aiops.report_versions SET status='CANCELLED',error='cancelled' WHERE report_id=%s",
+                "UPDATE public.aiops_report_versions SET status='CANCELLED',error='cancelled' WHERE report_id=%s",
                 (row["report_id"],),
             )
             return public_job(row)

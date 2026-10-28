@@ -31,10 +31,10 @@ def connect(settings):
 
 def require_schema(conn):
     row = conn.execute(
-        "SELECT version FROM aiops.schema_migrations WHERE version=1"
+        "SELECT version FROM public.aiops_schema_migrations WHERE version=2"
     ).fetchone()
     if not row:
-        raise ValueError("database migration 1 is required")
+        raise ValueError("database migration 2 is required")
 
 
 @contextmanager
@@ -51,13 +51,23 @@ def advisory_lock(settings, key):
 
 
 def migration_sql():
-    return files("aiops.storage").joinpath("sql/001_initial.sql").read_text()
+    scripts = [
+        files("aiops.storage").joinpath(name).read_text()
+        for name in ("sql/002_move_to_public.sql", "sql/001_initial.sql")
+    ]
+    body = "\n".join(
+        line
+        for script in scripts
+        for line in script.splitlines()
+        if line.strip() not in {"BEGIN;", "COMMIT;"}
+    )
+    return "BEGIN;\n" + body + "\nCOMMIT;\n"
 
 
 def initialize(settings):
     with connect(settings) as conn:
         conn.execute(migration_sql(), prepare=False)
-    return {"status": "ready", "schema": "aiops", "migration": 1}
+    return {"status": "ready", "schema": "public", "migration": 2}
 
 
 def doctor(settings):
@@ -68,7 +78,7 @@ def doctor(settings):
         ).fetchone()
         return {
             "status": "ready",
-            "schema": "aiops",
-            "migration": 1,
+            "schema": "public",
+            "migration": 2,
             "server_version": row["version"],
         }

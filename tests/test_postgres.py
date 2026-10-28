@@ -102,6 +102,8 @@ def pg_setup(postgres_url, tmp_path):
     # This is exclusively the fixture-created database, never a production DSN.
     with psycopg.connect(postgres_url, autocommit=True) as conn:
         conn.execute("DROP SCHEMA IF EXISTS aiops CASCADE")
+        conn.execute("DROP SCHEMA public CASCADE")
+        conn.execute("CREATE SCHEMA public")
     settings = Settings(data_dir=tmp_path / "data", database_url=postgres_url)
     initialize(settings)
     config = tmp_path / "sources.yaml"
@@ -126,19 +128,19 @@ def seed(service, day="2020-01-01", suffix="one"):
 def test_migration_is_explicit_idempotent_and_scoped(pg_setup):
     settings, _, _ = pg_setup
     initialize(settings)
-    assert doctor(settings)["migration"] == 1
+    assert doctor(settings)["migration"] == 2
     with psycopg.connect(settings.database_url) as conn:
         rows = conn.execute(
-            "SELECT tablename FROM pg_tables WHERE schemaname='aiops'"
+            "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename LIKE 'aiops_%'"
         ).fetchall()
         assert {row[0] for row in rows} == {
-            "schema_migrations",
-            "batches",
-            "reports",
-            "report_versions",
-            "report_dependencies",
-            "analysis_jobs",
-            "job_attempts",
+            "aiops_schema_migrations",
+            "aiops_batches",
+            "aiops_reports",
+            "aiops_report_versions",
+            "aiops_report_dependencies",
+            "aiops_analysis_jobs",
+            "aiops_job_attempts",
         }
 
 
@@ -147,16 +149,18 @@ def test_prepare_persists_batch_reference_and_version(pg_setup):
     first = seed(service)
     second = service.execute("daily", "2020-01-01")
     assert first["report_id"] == second["report_id"] and second["reused"]
-    store = PostgresReportStore(settings.data_dir / "reports", settings)
+    store = PostgresReportStore(settings.data_dir / "aiops_reports", settings)
     try:
         assert store.row(first["report_id"])["status"] == "PREPARED"
         assert (
-            store.db.execute("SELECT count(*) AS n FROM aiops.batches").fetchone()["n"]
+            store.db.execute(
+                "SELECT count(*) AS n FROM public.aiops_batches"
+            ).fetchone()["n"]
             == 1
         )
         assert (
             store.db.execute(
-                "SELECT count(*) AS n FROM aiops.report_dependencies"
+                "SELECT count(*) AS n FROM public.aiops_report_dependencies"
             ).fetchone()["n"]
             == 1
         )
@@ -240,13 +244,13 @@ def test_network_retry_has_backoff_and_attempt_history(pg_setup):
             assert failed["status"] == "PENDING" and failed["error"] == "network"
             assert worker.once()["status"] == "idle"
             queue.db.execute(
-                "UPDATE aiops.analysis_jobs SET available_at=now() WHERE job_id=%s",
+                "UPDATE public.aiops_analysis_jobs SET available_at=now() WHERE job_id=%s",
                 (job["job_id"],),
             )
             provider.fail = False
             assert worker.once()["status"] == "COMPLETED"
         attempts = queue.db.execute(
-            "SELECT status FROM aiops.job_attempts ORDER BY attempt"
+            "SELECT status FROM public.aiops_job_attempts ORDER BY attempt"
         ).fetchall()
         assert [row["status"] for row in attempts] == ["FAILED", "COMPLETED"]
         assert queue.list()[0]["attempt_count"] == 2
@@ -420,9 +424,9 @@ def test_sync_registers_unreferenced_batches_without_raw_logs(pg_setup):
     )
     assert sync_batches(settings)["registered"] == 1
     assert sync_batches(settings)["registered"] == 0
-    store = PostgresReportStore(settings.data_dir / "reports", settings)
+    store = PostgresReportStore(settings.data_dir / "aiops_reports", settings)
     try:
-        row = store.db.execute("SELECT * FROM aiops.batches").fetchone()
+        row = store.db.execute("SELECT * FROM public.aiops_batches").fetchone()
         assert row["relative_path"] == "collection/batches/batch-not-analyzed"
         assert "message" not in row
     finally:
@@ -456,28 +460,30 @@ def test_completion_is_atomic_if_report_update_fails(pg_setup):
         queue.enqueue(report["report_id"])
         owner = uuid4()
         job = queue.claim(owner)
-        queue.db.execute("""CREATE FUNCTION aiops.reject_completion() RETURNS trigger LANGUAGE plpgsql AS $$
+        queue.db.execute("""CREATE FUNCTION public.reject_completion() RETURNS trigger LANGUAGE plpgsql AS $$
             BEGIN IF NEW.status='COMPLETED' THEN RAISE EXCEPTION 'test failure'; END IF; RETURN NEW; END $$""")
         queue.db.execute(
-            "CREATE TRIGGER reject_completion BEFORE UPDATE ON aiops.report_versions FOR EACH ROW EXECUTE FUNCTION aiops.reject_completion()"
+            "CREATE TRIGGER reject_completion BEFORE UPDATE ON public.aiops_report_versions FOR EACH ROW EXECUTE FUNCTION public.reject_completion()"
         )
         result = FakeProvider().analyze(AnalysisRequest("{}")).model_dump()
         with pytest.raises(psycopg.Error):
             queue.finish(job, owner, result=result)
         assert queue.list()[0]["status"] == "RUNNING"
         assert (
-            queue.db.execute("SELECT status FROM aiops.job_attempts").fetchone()[
+            queue.db.execute("SELECT status FROM public.aiops_job_attempts").fetchone()[
                 "status"
             ]
             == "RUNNING"
         )
         assert (
-            queue.db.execute("SELECT status FROM aiops.report_versions").fetchone()[
-                "status"
-            ]
+            queue.db.execute(
+                "SELECT status FROM public.aiops_report_versions"
+            ).fetchone()["status"]
             == "RUNNING"
         )
-        queue.db.execute("DROP TRIGGER reject_completion ON aiops.report_versions")
+        queue.db.execute(
+            "DROP TRIGGER reject_completion ON public.aiops_report_versions"
+        )
         assert queue.finish(job, owner, result=result)["status"] == "COMPLETED"
     finally:
         queue.close()
@@ -535,7 +541,7 @@ def test_null_dependency_is_rejected(pg_setup):
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
         with pytest.raises(psycopg.errors.CheckViolation):
             conn.execute(
-                "INSERT INTO aiops.report_dependencies(report_id,dependency_type,dependency_id) VALUES (%s,'batch','missing')",
+                "INSERT INTO public.aiops_report_dependencies(report_id,dependency_type,dependency_id) VALUES (%s,'batch','missing')",
                 (report["report_id"],),
             )
 
@@ -632,3 +638,105 @@ def test_migration_runs_as_non_superuser_database_owner(pg_setup):
         finally:
             admin.execute("DROP DATABASE aiops_test_role")
             admin.execute("DROP ROLE aiops_test_app")
+
+
+def make_legacy_schema(settings, *, keep_unrelated=False):
+    from importlib.resources import files
+
+
+    names = (
+        "schema_migrations",
+        "batches",
+        "reports",
+        "report_versions",
+        "report_dependencies",
+        "analysis_jobs",
+        "job_attempts",
+    )
+    legacy = files("aiops.storage").joinpath("sql/001_initial.sql").read_text()
+    for name in names:
+        legacy = legacy.replace("public.aiops_" + name, "aiops." + name)
+    legacy = legacy.replace("aiops_analysis_jobs_pending", "analysis_jobs_pending")
+    legacy = legacy.replace("VALUES (1),(2)", "VALUES (1)")
+    legacy = legacy.replace("BEGIN;", "BEGIN; CREATE SCHEMA aiops;", 1)
+    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public", prepare=False)
+        conn.execute(legacy, prepare=False)
+        # Intentionally collide with generic old index/sequence names in public.
+        conn.execute(
+            "CREATE TABLE public.reports(period_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY)"
+        )
+        conn.execute("INSERT INTO public.reports DEFAULT VALUES")
+        period_id = conn.execute(
+            "INSERT INTO aiops.reports(kind,period_start,period_end) VALUES ('daily','2020-01-01','2020-01-02') RETURNING period_id"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO aiops.report_versions(report_id,period_id,revision,fingerprint,status,input_json,manifest_json,coverage_complete) VALUES ('preserved-version',%s,1,%s,'PREPARED','{}','{}',false)",
+            (period_id, "a" * 64),
+        )
+        conn.execute(
+            "INSERT INTO aiops.analysis_jobs(job_id,report_id,status) VALUES (%s,'preserved-version','PENDING')",
+            (uuid4(),),
+        )
+        if keep_unrelated:
+            conn.execute("CREATE TABLE aiops.unrelated_table(id integer)")
+    return period_id
+
+
+@pytest.mark.parametrize("keep_unrelated", [False, True])
+def test_legacy_upgrade_preserves_data_foreign_keys_and_identity(
+    pg_setup, keep_unrelated
+):
+    settings, _, _ = pg_setup
+    previous_id = make_legacy_schema(settings, keep_unrelated=keep_unrelated)
+    assert initialize(settings)["schema"] == "public"
+    assert doctor(settings)["migration"] == 2
+    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        assert (
+            conn.execute("SELECT report_id FROM public.aiops_analysis_jobs").fetchone()[
+                0
+            ]
+            == "preserved-version"
+        )
+        assert conn.execute("SELECT count(*) FROM public.reports").fetchone()[0] == 1
+        new_id = conn.execute(
+            "INSERT INTO public.aiops_reports(kind,period_start,period_end) VALUES ('daily','2020-01-02','2020-01-03') RETURNING period_id"
+        ).fetchone()[0]
+        assert new_id > previous_id
+        assert (
+            conn.execute("SELECT to_regnamespace('aiops') IS NOT NULL").fetchone()[0]
+            == keep_unrelated
+        )
+    initialize(settings)
+    store = PostgresReportStore(settings.data_dir / "reports", settings)
+    try:
+        assert store.row("preserved-version")["fingerprint"] == "a" * 64
+    finally:
+        store.close()
+
+
+def test_legacy_upgrade_collision_rolls_back_without_overwriting(pg_setup):
+    settings, _, _ = pg_setup
+    make_legacy_schema(settings)
+    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        conn.execute("CREATE TABLE public.aiops_reports(original_value text)")
+        conn.execute("INSERT INTO public.aiops_reports VALUES ('keep-existing-data')")
+    with pytest.raises(psycopg.Error):
+        initialize(settings)
+    with psycopg.connect(settings.database_url) as conn:
+        assert (
+            conn.execute("SELECT original_value FROM public.aiops_reports").fetchone()[
+                0
+            ]
+            == "keep-existing-data"
+        )
+        assert (
+            conn.execute("SELECT count(*) FROM aiops.report_versions").fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT to_regclass('public.aiops_schema_migrations')"
+            ).fetchone()[0]
+            is None
+        )

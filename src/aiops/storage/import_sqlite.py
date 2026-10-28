@@ -49,7 +49,7 @@ def sync_batches(settings):
                     known = {
                         row["batch_id"]
                         for row in target.db.execute(
-                            "SELECT batch_id FROM aiops.batches"
+                            "SELECT batch_id FROM public.aiops_batches"
                         )
                     }
                     ids = [

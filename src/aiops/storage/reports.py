@@ -10,7 +10,7 @@ from aiops.reporting.store import ReportStore, encoded
 from aiops.storage.postgres import CATALOGUE_LOCK, connect, require_schema
 
 REPORT_SELECT = """SELECT v.*, p.kind, p.period_start, p.period_end
-                  FROM aiops.report_versions v JOIN aiops.reports p USING(period_id)"""
+                  FROM public.aiops_report_versions v JOIN public.aiops_reports p USING(period_id)"""
 
 
 def compatible(row):
@@ -75,12 +75,12 @@ class PostgresReportStore(ReportStore):
 
     def _period(self, kind, start, end):
         self.db.execute(
-            """INSERT INTO aiops.reports(kind,period_start,period_end)
+            """INSERT INTO public.aiops_reports(kind,period_start,period_end)
                            VALUES (%s,%s,%s) ON CONFLICT(kind,period_start) DO NOTHING""",
             (kind, start, end),
         )
         return self.db.execute(
-            "SELECT period_id FROM aiops.reports WHERE kind=%s AND period_start=%s FOR UPDATE",
+            "SELECT period_id FROM public.aiops_reports WHERE kind=%s AND period_start=%s FOR UPDATE",
             (kind, start),
         ).fetchone()["period_id"]
 
@@ -88,7 +88,7 @@ class PostgresReportStore(ReportStore):
         if "/" in batch_id or "\\" in batch_id or batch_id in {".", ".."}:
             raise ValueError("invalid batch identifier")
         if self.db.execute(
-            "SELECT 1 FROM aiops.batches WHERE batch_id=%s", (batch_id,)
+            "SELECT 1 FROM public.aiops_batches WHERE batch_id=%s", (batch_id,)
         ).fetchone():
             return False
         collection = self.root.parent / "collection" / "batches"
@@ -96,7 +96,7 @@ class PostgresReportStore(ReportStore):
             (collection / batch_id / "snapshot.json").read_text()
         )
         self.db.execute(
-            """INSERT INTO aiops.batches
+            """INSERT INTO public.aiops_batches
             (batch_id,collected_at,period_start,period_end,relative_path,coverage,totals,masked)
             VALUES (%s,%s,%s,%s,%s,%s,%s,true) ON CONFLICT(batch_id) DO NOTHING""",
             (
@@ -117,7 +117,7 @@ class PostgresReportStore(ReportStore):
         for batch_id in manifest.get("batch_ids", []):
             self.register_batch(batch_id)
             self.db.execute(
-                """INSERT INTO aiops.report_dependencies
+                """INSERT INTO public.aiops_report_dependencies
                 (report_id,dependency_type,dependency_id,batch_id) VALUES (%s,'batch',%s,%s) ON CONFLICT DO NOTHING""",
                 (report_id, batch_id, batch_id),
             )
@@ -127,7 +127,7 @@ class PostgresReportStore(ReportStore):
         ):
             for child in ids:
                 self.db.execute(
-                    """INSERT INTO aiops.report_dependencies
+                    """INSERT INTO public.aiops_report_dependencies
                     (report_id,dependency_type,dependency_id,child_report_id) VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
                     (report_id, kind, child, child),
                 )
@@ -136,18 +136,18 @@ class PostgresReportStore(ReportStore):
         with self.db.transaction():
             period_id = self._period(period.kind, period.label, period.end.date())
             row = self.db.execute(
-                "SELECT report_id FROM aiops.report_versions WHERE period_id=%s AND fingerprint=%s",
+                "SELECT report_id FROM public.aiops_report_versions WHERE period_id=%s AND fingerprint=%s",
                 (period_id, fingerprint),
             ).fetchone()
             if row:
                 return self.row(row["report_id"]), True
             revision = self.db.execute(
-                "SELECT COALESCE(MAX(revision),0)+1 AS revision FROM aiops.report_versions WHERE period_id=%s",
+                "SELECT COALESCE(MAX(revision),0)+1 AS revision FROM public.aiops_report_versions WHERE period_id=%s",
                 (period_id,),
             ).fetchone()["revision"]
             report_id = f"{period.kind}-{period.label}-v{revision:04d}"
             self.db.execute(
-                """INSERT INTO aiops.report_versions
+                """INSERT INTO public.aiops_report_versions
                 (report_id,period_id,revision,fingerprint,status,input_json,manifest_json,coverage_complete)
                 VALUES (%s,%s,%s,%s,'PREPARED',%s,%s,%s)""",
                 (
@@ -165,7 +165,7 @@ class PostgresReportStore(ReportStore):
 
     def status(self, report_id, status, *, result=None, error=None):
         self.db.execute(
-            """UPDATE aiops.report_versions SET status=%s,result_json=%s,error=%s,
+            """UPDATE public.aiops_report_versions SET status=%s,result_json=%s,error=%s,
             completed_at=CASE WHEN %s='COMPLETED' THEN now() ELSE NULL END WHERE report_id=%s""",
             (
                 status,
@@ -182,8 +182,8 @@ class PostgresReportStore(ReportStore):
             compatible(row)
             for row in self.db.execute(
                 """SELECT v.report_id,p.kind,p.period_start,p.period_end,
-            v.revision,v.status,v.coverage_complete,v.error FROM aiops.report_versions v
-            JOIN aiops.reports p USING(period_id) WHERE (%s::text IS NULL OR kind=%s)
+            v.revision,v.status,v.coverage_complete,v.error FROM public.aiops_report_versions v
+            JOIN public.aiops_reports p USING(period_id) WHERE (%s::text IS NULL OR kind=%s)
             ORDER BY period_start DESC,kind,revision DESC""",
                 (kind, kind),
             )
@@ -205,7 +205,7 @@ class PostgresReportStore(ReportStore):
                 )
                 status = "FAILED" if row["status"] == "RUNNING" else row["status"]
                 self.db.execute(
-                    """INSERT INTO aiops.report_versions
+                    """INSERT INTO public.aiops_report_versions
                     (report_id,period_id,revision,fingerprint,status,created_at,completed_at,input_json,
                      manifest_json,coverage_complete,result_json,error)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",

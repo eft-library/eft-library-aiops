@@ -31,3 +31,10 @@
 전용 DB/계정·비밀번호, 기존 PostgreSQL 포트 13245 접속, 스키마 적용은 운영자가 [POSTGRES_WORKER.md](POSTGRES_WORKER.md)를 따라 수행해야 한다. Codex 로그인·모델 접근·systemd PATH·자원 사용량은 운영 환경에서 worker --once로 검증한다. 원본 서비스 설정·DB의 다른 테이블·방화벽은 변경하지 않았다.
 
 상시 서비스 등록·Airflow DAG·수집/보고 스케줄·자동 연쇄 재분석·FastAPI 9023·프론트 4003은 아직 설치하지 않았다. 외부 AI 성공과 DB 커밋 사이 강제 종료 시 AI 요청이 재실행될 수 있어 사용량의 정확히 한 번 처리를 보장하지 않는다. DB 결과 중복과 오래된 소유자의 덮어쓰기는 차단한다.
+
+
+## public 스키마 전환 검증
+
+사용자 요청에 따라 기본 PostgreSQL 저장소를 public.aiops_* 테이블로 전환했다. 마이그레이션 버전은 2다. 새 DB 생성과 기존 aiops 스키마의 데이터 보존 이전을 모두 실제 임시 PostgreSQL에서 검증했다. 기존 public.reports 및 같은 일반 이름의 identity sequence/index가 있어도 보존됐고, public.aiops_* 대상이 이미 있으면 병합/덮어쓰기 없이 전체 이전을 중단했다. 별도 aiops 객체가 남아 있으면 해당 스키마를 삭제하지 않았다.
+
+전체 테스트 172 passed, 1 skipped. SQL·코드 변경을 운영 DB에 직접 적용하지 않았다. 사용자가 다시 만든 운영 DB에는 최신 db init으로 public 테이블을 바로 생성한다.

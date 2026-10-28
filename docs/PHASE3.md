@@ -81,7 +81,7 @@ Phase 2의 날짜별 로그·지표를 일일 분석하고, 일일 보고서로 
 ## 7. 데이터 저장
 - 기간 정체성(kind/start/end/timezone), report ID·revision·input fingerprint, batch/child report 의존 관계, 결과·완전성·stale 여부를 PostgreSQL에도 보존한다. 로컬 reports.sqlite3에서 PostgreSQL로 명시적 import-sqlite 이전을 제공하며 기존 이력과 ID를 유지한다. Collector 체크포인트는 SQLite에 유지한다.
 - PostgreSQL 17에 작업 이력 및 분석 결과를 저장한다. 로컬에서는 전용 테스트 DB로 저장·마이그레이션·복구를 검증하고, 운영 접속 설정(포트 **13245**)과 분리한다. 기존 운영 DB 스키마는 **승인 없이 변경 금지**.
-- Phase 3에서 마이그레이션 SQL과 적용·복구 절차를 작성하고 로컬 전용 DB에 적용해 검증한다. 운영 적용은 별도 AIOps 스키마 또는 전용 DB를 대상으로 검토·승인 후 수행한다.
+- Phase 3에서 마이그레이션 SQL과 적용·복구 절차를 작성하고 로컬 전용 DB에 적용해 검증한다. 운영 적용은 전용 DB의 public.aiops_ 테이블를 대상으로 검토·승인 후 수행한다.
 - 대량 원본 로그는 PostgreSQL에 적재하지 않고 Phase 2 배치/원본 경로를 참조한다.
 - 재분석 시 동일 배치를 식별하고 중복 보고서 생성을 방지한다.
 
@@ -145,4 +145,4 @@ Phase 1~3의 로컬 구현·검증 완료 후 진행한다.
 > Phase 3만 로컬에서 구현하라. 가짜 Provider와 전용 테스트 PostgreSQL로 전체 흐름을 검증하고, Airflow DAG와 배포·복구 절차를 준비하라. 운영 서버 접근을 로컬 완료 조건으로 삼지 말라. Phase 2의 정제된 JSON 배치를 입력으로 받고, 검증된 공식 Codex SDK 또는 CLI를 통해 읽기 전용 분석을 수행하라. 전역 동시 실행 1개, 구조화된 결과 검증, 상태 관리, 근거 추적, 오류 복구를 우선 구현하라. 실제 운영 DB 변경·서비스 조치·파일 수정은 승인 없이 하지 말라.
 
 ## 14. PostgreSQL·Worker 구현 상태
-전용 스키마 SQL, PostgreSQL 보고서/배치 참조 저장소, 중복 방지 작업 큐·우선순위·시도 이력·백오프·단일 Worker·소유권 기반 결과 확정·복구와 systemd 예제를 구현했다. 실제 PostgreSQL 17의 임시 DB 및 가짜 Provider로 검증했다. 운영 DB 적용·서비스 등록·Airflow·FastAPI·실 AI 호출 통합 검증은 아직 수행하지 않았다. 서버 적용 순서는 [POSTGRES_WORKER.md](POSTGRES_WORKER.md), 검증은 [PHASE3_VALIDATION.md](PHASE3_VALIDATION.md)를 따른다.
+public.aiops_ 테이블 SQL, PostgreSQL 보고서/배치 참조 저장소, 중복 방지 작업 큐·우선순위·시도 이력·백오프·단일 Worker·소유권 기반 결과 확정·복구와 systemd 예제를 구현했다. 실제 PostgreSQL 17의 임시 DB 및 가짜 Provider로 검증했다. 운영 DB 적용·서비스 등록·Airflow·FastAPI·실 AI 호출 통합 검증은 아직 수행하지 않았다. 서버 적용 순서는 [POSTGRES_WORKER.md](POSTGRES_WORKER.md), 검증은 [PHASE3_VALIDATION.md](PHASE3_VALIDATION.md)를 따른다.
