@@ -62,3 +62,12 @@
 - 반복 프록시 경고가 많아도 다른 서비스의 심각한 오류와 성능 지표가 입력 제한에서 함께 보존되는지 검증했다. 높은 심각도 및 지연 표본의 대표 이벤트 선정과 월간 크기 제한에서 모든 일일 ID·구역 상태의 보존도 검증했다.
 - 임시 PostgreSQL + 가짜 Provider의 Worker 실행 → JSON 저장 → HTTP 조회와 상위 보고서 요약 전달을 확인했다.
 - 로컬 Chromium으로 장애·성능 구역, 판단 근거 부족 상태, 근거 펼치기, 이전 형식 보고서 안내와 모바일 너비를 확인했다. 패키지 빌드도 통과했다.
+
+## Worker SSE 진행 메시지
+
+- 전체 PostgreSQL opt-in 검증 포함 203 passed, 1 skipped. 실제 Codex 모델은 호출하지 않았으며 설치 CLI 0.165.0의 버전과 공식 JSONL 이벤트 계약을 확인했다.
+- 실시간 subprocess stdout 수신, 큰 stdin/stderr의 동시 처리, 출력 상한, 타임아웃/취소 시 자식 프로세스 그룹 정리를 검증했다.
+- 내부 reasoning·부분 delta·도구 인수와 출력 제외, API 키/DB 비밀번호/민감 패턴 마스킹, 완료 전 보고서 후보의 비노출을 검증했다.
+- 임시 PostgreSQL + 가짜 Provider에서 SSE 인증, 기존 CLI/HTTP Worker와의 단일 실행 잠금, 최종 상태와 JSON 저장, 인증 실패·네트워크 재시도 상태를 확인했다.
+- 실제 로컬 Uvicorn/HTTP 스트림과 가짜 Codex 실행 파일로 완료 전 공개 메시지 전달, heartbeat, 동시 호출 409, 연결 종료 시 프로세스 종료와 interrupted/PENDING 기록을 검증했다.
+- 전송 버퍼 128개 상한과 최종 이벤트 보존·생략 개수를 검증했다. 수신 계약은 [WORKER_STREAM.md](WORKER_STREAM.md)를 따른다. 별도 Airflow 프로젝트의 실제 로그 연결은 운영 연동에서 확인한다.

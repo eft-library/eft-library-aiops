@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from aiops.config import Settings
 from aiops.data_permissions import data_directory, data_file
-from aiops.process import run
+from aiops.process import run, run_streamed
 from aiops.providers.base import (
     AnalysisRequest,
     AnalysisResult,
@@ -69,6 +69,12 @@ class CodexProvider:
         data_directory(settings.data_dir)
 
     def analyze(self, request: AnalysisRequest) -> AnalysisResult:
+        return self._analyze(request)
+
+    def analyze_stream(self, request: AnalysisRequest, emit, *, cancel=None) -> AnalysisResult:
+        return self._analyze(request, emit=emit, cancel=cancel)
+
+    def _analyze(self, request: AnalysisRequest, *, emit=None, cancel=None) -> AnalysisResult:
         if len(request.snapshot.encode("utf-8")) > self.settings.max_input_bytes:
             raise ProviderError(ErrorKind.CONFIG)
         job_id = str(uuid4())
@@ -146,7 +152,15 @@ class CodexProvider:
                         command[
                             command.index("exec") + 1 : command.index("exec") + 1
                         ] = ["--model", self.settings.model]
-                    code, stdout, stderr = run(
+                    options = {}
+                    runner = run
+                    if emit is not None:
+                        from aiops.providers.progress import PublicProgress
+
+                        progress = PublicProgress(self.settings, emit)
+                        options = {"on_stdout_line": progress.line, "cancel": cancel}
+                        runner = run_streamed
+                    code, stdout, stderr = runner(
                         command,
                         timeout=self.settings.timeout,
                         cwd=workspace,
@@ -155,6 +169,7 @@ class CodexProvider:
                         + "\n<untrusted_snapshot>\n"
                         + request.snapshot
                         + "\n</untrusted_snapshot>",
+                        **options,
                     )
                 try:
                     events = [

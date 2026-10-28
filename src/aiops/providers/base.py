@@ -15,6 +15,7 @@ class ErrorKind(StrEnum):
     BUSY = 'busy'
     OUTPUT = 'invalid_output'
     EXECUTION = 'execution'
+    INTERRUPTED = 'interrupted'
 
 
 class ProviderError(Exception):

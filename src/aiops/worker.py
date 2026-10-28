@@ -39,11 +39,16 @@ class Worker:
         self.queue.close()
         self.guard_context.__exit__(*args)
 
-    def once(self):
+    def once(self, *, on_event=None, cancel=None):
         self.guard.execute("SELECT 1")
+        if cancel is not None and cancel.is_set():
+            return {"status": "idle", "recovered_jobs": self.recovered}
         job = self.queue.claim(self.worker_id)
         if job is None:
             return {"status": "idle", "recovered_jobs": self.recovered}
+        if on_event is not None:
+            on_event({"event": "worker.claimed", "job_id": str(job["job_id"]),
+                      "report_id": job["report_id"], "attempt_count": job["attempt_count"]})
         reports = PostgresReportStore(
             self.settings.data_dir / "reports", self.settings, lock=False
         )
@@ -68,7 +73,13 @@ class Worker:
                     provider = self.provider or CodexProvider(
                         replace(self.settings, model=policy["model"])
                     )
-                    result = provider.analyze(AnalysisRequest(row["input_json"]))
+                    request = AnalysisRequest(row["input_json"])
+                    if on_event is not None and callable(getattr(provider, "analyze_stream", None)):
+                        result = provider.analyze_stream(request, on_event, cancel=cancel)
+                    else:
+                        result = provider.analyze(request)
+                    if on_event is not None:
+                        on_event({"event": "worker.validating", "job_id": str(job["job_id"])})
                     validate_references(result, json.loads(row["input_json"]))
                     self.guard.execute("SELECT 1")
                     outcome = self.queue.finish(
@@ -87,6 +98,9 @@ class Worker:
             if outcome is not None:
                 # DB commit precedes file publication. A report list/run can regenerate views.
                 reports.export(reports.row(job["report_id"]))
+                if on_event is not None and outcome["status"] == "COMPLETED":
+                    on_event({"event": "worker.report", "job_id": str(job["job_id"]),
+                              "summary": result.report.summary, "severity": result.report.severity})
             if interrupted:
                 raise KeyboardInterrupt
             return outcome or {"job_id": str(job["job_id"]), "status": "lease_lost"}
@@ -119,6 +133,7 @@ def run(settings, *, once=False, poll_seconds=5, provider=None):
                             "timeout": 6,
                             "invalid_output": 8,
                             "configuration": 2,
+                            "interrupted": 130,
                         }.get(result.get("error"), 9)
                     return 0
                 if result.get("error") in {"authentication", "rate_limit"}:

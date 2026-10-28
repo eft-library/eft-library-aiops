@@ -46,6 +46,10 @@ AIOPS_API_TOKEN=직접_생성한_비밀키
 
 수동 진단은 `collect --all`, `report run --type daily`, `worker --once`, `status`로 할 수 있습니다. 수집은 DB 등록까지 자동 처리하고, report run은 입력 준비·큐 등록을 통합합니다. DB 없는 로컬 모드에서는 report run이 직접 Codex를 호출합니다. `db`, `jobs`, `report prepare`는 관리·복구용입니다.
 
+### Airflow에서 실시간 진행 로그 보기
+
+`POST /v1/worker/run-once/stream`은 Codex의 공개 메시지·실행 이벤트·제공된 토큰 사용량과 최종 작업 상태를 SSE로 전달합니다. 기존 JSON Worker API도 유지합니다. 진행 로그를 보려면 별도 Airflow 프로젝트에서 스트리밍 호출과 `log.info()` 수신을 연결해야 합니다. 추가 Codex 호출이나 DB 마이그레이션은 없습니다. [스트리밍 수신 계약과 예시](docs/WORKER_STREAM.md)를 참고하세요.
+
 ### 조회 전용 웹 (4003)
 
 대시보드, 일일·주간·월간 보고서 목록과 상세, 수집 현황, 분석 작업 현황을 제공합니다. 기간·위험도·분석 상태로 조회하고 이전 수정본도 확인할 수 있습니다. 실행·재시도·설정 변경 기능은 없습니다.

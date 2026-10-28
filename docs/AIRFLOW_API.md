@@ -72,6 +72,7 @@ Airflow DAG·Connection·Docker 네트워크·스케줄은 별도 Airflow 프로
 | GET /v1/status | DB·수집·최근 작업 현황 |
 | POST /v1/collect `{}` | 설정된 전체 소스 수집. `{"services":["fastapi"]}`로 선택 가능 |
 | POST /v1/reports `{"type":"daily","date":"2026-10-27"}` | 입력 준비·큐 등록. date 생략 시 마지막 마감 기간. HTTP 202는 분석 접수 |
+| POST /v1/worker/run-once/stream | 공개 진행 메시지와 최종 작업 상태를 SSE로 전달. [수신 계약](WORKER_STREAM.md) |
 | POST /v1/worker/run-once | 동기적으로 작업 한 건 처리. 실제 Codex 호출 지점 |
 | GET /v1/jobs/{job_id} | 접수한 특정 작업의 상태·오류 확인 |
 | GET /v1/reports/{report_id} | 보고서 상태와 분석 결과. 결과 본문은 result.report |
@@ -93,3 +94,7 @@ API 재시작 후에도 작업 큐·분석 결과는 DB에 남는다. 중단된 
 ## 일일 점검 확장
 
 기존 type=daily 호출 한 번에 장애 분석과 성능 분석도 같은 보고서 안에 포함된다. Airflow DAG나 요청 body를 추가하지 않는다. 결과의 result.report.incident_analysis / performance_analysis에서 각 구역의 status/summary/findings/limitations를 확인한다. 이전 완료 보고서에는 해당 필드가 없을 수 있다. 성능 근거가 없으면 INSUFFICIENT_DATA로 표시하며, 이것은 분석 작업 실패가 아니다. 자세한 계약은 [REPORTING.md](REPORTING.md)를 따른다.
+
+## 실시간 진행 로그
+
+진행 로그가 필요하면 Worker 호출만 /v1/worker/run-once/stream으로 바꾸고 SSE를 줄 단위로 받아 Airflow logger에 기록한다. 기존 JSON Worker API도 계속 사용할 수 있다. 이 기능은 외부 Airflow 프로젝트의 수신부 수정이 필요하며 DB 스키마 변경은 없다. 내부 reasoning은 전달하지 않는다. [WORKER_STREAM.md](WORKER_STREAM.md)의 이벤트·완료·연결 종료 계약을 따른다.

@@ -31,3 +31,7 @@ Provider 인터페이스는 실행 방식과 분리되어 있으므로 향후 SD
 [공식 인증 문서](https://learn.chatgpt.com/docs/auth)에 따르면 ChatGPT 로그인은 구독 접근을 사용하고 API 키 로그인은 OpenAI Platform의 API 요율로 청구된다. `codex exec`는 저장된 CLI 인증을 재사용한다. SDK도 로컬 Codex 런타임을 제어하지만 이번에는 SDK를 통한 실제 인증 재사용 호출까지 검증하지 않았으며, CLI 방식의 실제 샘플 분석을 검증했다.
 
 플랜별 잔여 사용량을 추정하지 않으며 한도 초과를 별도 오류로 반환한다. 자동 로그인·인증 파일 복사·API 키 전환·무한 재시도는 하지 않는다.
+
+## 진행 이벤트의 선택적 전달
+
+기존 analyze는 종료 후 결과를 반환한다. analyze_stream은 같은 codex exec --json 한 번을 실행하면서 완성된 공개 agent_message와 허용된 실행 이벤트를 콜백에 전달한다. 최종 Report 검증과 저장 방식은 동일하다. reasoning 본문, raw stderr, 도구 인수와 출력은 제외한다. API 전송은 [WORKER_STREAM.md](WORKER_STREAM.md)를 따른다.

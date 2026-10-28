@@ -913,3 +913,151 @@ def test_daily_specialist_sections_survive_worker_storage_api_and_weekly_summary
     finally:
         store.close()
     assert views.reports(settings)["total"] == 1
+
+
+def test_streaming_worker_preserves_auth_lock_validation_and_final_status(pg_setup):
+    from fastapi.testclient import TestClient
+
+    from aiops.api import create_app
+
+    settings, service, config = pg_setup
+    seed(service)
+    job = submit(settings, "daily", "2020-01-01", config=config, interval_minutes=1440)
+
+    class StreamingProvider(FakeProvider):
+        def analyze_stream(self, request, emit, *, cancel=None):
+            emit({"event": "codex.message", "message": "공개 메시지 private-param-key"})
+            result = self.analyze(request)
+            result.report.summary = "완료 요약 private-param-key"
+            return result
+
+    provider = StreamingProvider()
+    with TestClient(create_app(settings, token="private-param-key", sources_config=config, provider=provider)) as client:
+        assert client.post("/v1/worker/run-once/stream").status_code == 401
+        client.headers["X-AIOps-Key"] = "private-param-key"
+        with Worker(settings):
+            assert client.post("/v1/worker/run-once/stream").status_code == 409
+        response = client.post("/v1/worker/run-once/stream")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert response.headers["x-accel-buffering"] == "no"
+        assert "private-param-key" not in response.text
+        frames = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        assert frames[-1]["event"] == "worker.finished"
+        assert frames[-1]["job"]["status"] == "COMPLETED"
+        assert frames[-1]["job"]["job_id"] == job["job_id"]
+        assert any(frame["event"] == "codex.message" for frame in frames)
+        assert any(frame["event"] == "worker.report" for frame in frames)
+        assert [frame["sequence"] for frame in frames] == sorted(frame["sequence"] for frame in frames)
+        assert len(provider.calls) == 1
+        assert client.get("/v1/jobs/" + job["job_id"]).json()["status"] == "COMPLETED"
+        idle = client.post("/v1/worker/run-once/stream")
+        assert '"status": "idle"' in idle.text
+
+
+@pytest.mark.parametrize("kind,expected", [(ErrorKind.AUTH, "FAILED"), (ErrorKind.NETWORK, "PENDING")])
+def test_streamed_model_failure_is_not_reported_as_success(pg_setup, kind, expected):
+    from fastapi.testclient import TestClient
+
+    from aiops.api import create_app
+
+    settings, service, config = pg_setup
+    seed(service)
+    job = submit(settings, "daily", "2020-01-01", config=config, interval_minutes=1440)
+
+    class FailedProvider:
+        def analyze_stream(self, request, emit, *, cancel=None):
+            raise ProviderError(kind)
+
+    with TestClient(create_app(settings, token="key", sources_config=config, provider=FailedProvider())) as client:
+        response = client.post("/v1/worker/run-once/stream", headers={"X-AIOps-Key": "key"})
+        frames = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        assert frames[-1]["event"] == "worker.finished"
+        assert frames[-1]["job"]["status"] == expected
+        assert frames[-1]["job"]["error"] == kind.value
+        assert frames[-1]["job"]["job_id"] == job["job_id"]
+
+
+def test_live_stream_emits_before_completion_and_disconnect_requeues_job(pg_setup, tmp_path, monkeypatch):
+    import socket
+    import sys
+    import threading
+    import time
+    from dataclasses import replace
+
+    import httpx
+    import uvicorn
+
+    from aiops.api import create_app
+
+    monkeypatch.setattr("aiops.streaming.HEARTBEAT_SECONDS", 0.1)
+
+    settings, service, config = pg_setup
+    pid_file = tmp_path / "fake-codex.pid"
+    fake = tmp_path / "fake-codex"
+    fake.write_text(f'''#!{sys.executable}
+import json,os,time
+from pathlib import Path
+Path({str(pid_file)!r}).write_text(str(os.getpid()))
+print(json.dumps({{"type":"thread.started","thread_id":"fake-thread"}}),flush=True)
+print(json.dumps({{"type":"turn.started"}}),flush=True)
+print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text":"public progress before completion"}}}}),flush=True)
+time.sleep(30)
+''')
+    fake.chmod(0o755)
+    settings = replace(settings, codex_bin=str(fake), timeout=15)
+    service.settings = settings
+    seed(service)
+    job = submit(settings, "daily", "2020-01-01", config=config, interval_minutes=1440)
+    app = create_app(settings, token="key", sources_config=config)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    listener.listen()
+    server = uvicorn.Server(uvicorn.Config(app, log_level="critical"))
+    thread = threading.Thread(target=lambda: server.run(sockets=[listener]), daemon=True)
+    thread.start()
+    queue = JobQueue(settings)
+    try:
+        deadline = time.monotonic() + 5
+        while not server.started and time.monotonic() < deadline:
+            time.sleep(.02)
+        assert server.started
+        url = f"http://127.0.0.1:{port}/v1/worker/run-once/stream"
+        started = time.monotonic()
+        with httpx.stream("POST", url, headers={"X-AIOps-Key": "key"}, timeout=5) as response:
+            assert response.status_code == 200
+            lines = response.iter_lines()
+            for line in lines:
+                if line.startswith("data: ") and json.loads(line[6:]).get("event") == "codex.message":
+                    break
+            else:
+                pytest.fail("No public progress was streamed before completion")
+            assert time.monotonic() - started < 5
+            for line in lines:
+                if line.startswith("data: ") and json.loads(line[6:]).get("event") == "heartbeat":
+                    heartbeat = json.loads(line[6:])
+                    assert heartbeat["job_id"] == job["job_id"]
+                    break
+            else:
+                pytest.fail("No keepalive heartbeat")
+            assert queue.list()[0]["status"] == "RUNNING"
+            assert httpx.post(url, headers={"X-AIOps-Key": "key"}).status_code == 409
+        # Closing the real HTTP stream must cancel the CLI and persist retry state.
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            row = queue.list()[0]
+            if row["status"] == "PENDING" and row["error"] == "interrupted":
+                break
+            time.sleep(.05)
+        assert row["job_id"] == job["job_id"]
+        assert row["status"] == "PENDING" and row["error"] == "interrupted"
+        assert row["attempt_count"] == 1
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(pid_file.read_text()), 0)
+    finally:
+        queue.close()
+        server.should_exit = True
+        thread.join(timeout=10)
+        listener.close()
+        assert not thread.is_alive()

@@ -15,6 +15,7 @@ from aiops.providers.codex import CodexProvider, doctor
 
 EXIT_CODES = {
     ErrorKind.DATABASE: 11,
+    ErrorKind.INTERRUPTED: 130,
     ErrorKind.CONFIG: 2,
     ErrorKind.AUTH: 3,
     ErrorKind.NETWORK: 4,
