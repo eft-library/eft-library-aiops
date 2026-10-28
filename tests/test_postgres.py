@@ -788,3 +788,45 @@ def test_missing_report_input_has_actionable_safe_error(pg_setup, monkeypatch, c
     assert error["error"] == "no_report_input"
     assert "전날" in error["message"]
     assert settings.database_url not in error["message"]
+
+
+def test_http_api_enqueues_executes_and_exposes_result_without_airflow_files(pg_setup):
+    from fastapi.testclient import TestClient
+
+    from aiops.api import create_app
+
+    settings, service, config = pg_setup
+    seed(service)
+    provider = FakeProvider()
+    with TestClient(create_app(
+        settings, token="test-only-key", sources_config=config, provider=provider,
+    )) as client:
+        assert client.post("/v1/worker/run-once").status_code == 401
+        client.headers["X-AIOps-Key"] = "wrong"
+        assert client.get("/v1/status").status_code == 401
+        client.headers["X-AIOps-Key"] = "test-only-key"
+        assert client.post("/v1/reports", json={
+            "type": "daily", "date": "2020-01-01", "config": "/etc/passwd",
+        }).status_code == 422
+        response = client.post("/v1/reports", json={"type": "daily", "date": "2020-01-01"})
+        assert response.status_code == 202
+        job = response.json()
+        assert job["status"] == "PENDING"
+        assert not provider.calls
+        repeated = client.post("/v1/reports", json={"type": "daily", "date": "2020-01-01"})
+        assert repeated.json()["job_id"] == job["job_id"]
+        outcome = client.post("/v1/worker/run-once")
+        assert outcome.status_code == 200
+        assert outcome.json()["status"] == "COMPLETED"
+        assert client.get("/v1/jobs/" + job["job_id"]).json()["status"] == "COMPLETED"
+        report = client.get("/v1/reports/" + job["report_id"]).json()
+        assert report["status"] == "COMPLETED"
+        assert report["result"]["report"]["summary"]
+        assert client.post("/v1/worker/run-once").json()["status"] == "idle"
+        assert client.get("/v1/jobs/" + str(uuid4())).status_code == 404
+        assert client.post("/v1/reports", json={"type": "daily", "date": "1999-01-01"}).json()["error"] == "no_report_input"
+        with Worker(settings, provider=provider):
+            assert client.post("/v1/worker/run-once").status_code == 409
+        collected = client.post("/v1/collect", json={})
+        assert collected.status_code == 200
+        assert collected.json()["database_registration"]["status"] == "synced"

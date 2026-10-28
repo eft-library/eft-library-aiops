@@ -17,7 +17,7 @@ Phase 2의 날짜별 로그·지표를 일일 분석하고, 일일 보고서로 
 - 기간은 시작 포함·끝 제외이며 아직 종료되지 않은 기간은 분석하지 않는다. 월 경계에 걸친 주간 보고서 수치를 월간에 중복 합산하지 않는다.
 - 지연 로그로 입력이 바뀌면 같은 기간의 새 버전을 만든다. 같은 입력으로 완료된 결과는 재사용하고, 하위 보고서 변경은 상위 보고서의 stale 상태로 전파한다.
 - 누락·불완전·오래된 daily는 상위 입력에서 명시한다. 분석 완료와 데이터 완전성은 별도 상태다.
-- 현재 로컬 SQLite 및 PostgreSQL 카탈로그와 `report prepare/run/list`, DB 작업 큐·단일 Worker로 위 계약을 구현했다. PostgreSQL 모드 run은 큐 등록이며 Worker가 실제 분석한다. API·DAG는 별도 구현 대상이다. 상세 계약은 [REPORTING.md](REPORTING.md)를 따른다.
+- 현재 로컬 SQLite 및 PostgreSQL 카탈로그와 `report prepare/run/list`, DB 작업 큐·단일 Worker로 위 계약을 구현했다. PostgreSQL 모드 run은 큐 등록이며 Worker가 실제 분석한다. 호스트 API(9023)를 제공하며 Airflow DAG는 별도 프로젝트에서 관리한다. 상세 계약은 [REPORTING.md](REPORTING.md)를 따른다.
 
 ## 2. 입력 계약
 - daily 입력은 전체 일일 집계·관측 지표·제한된 대표 로그와 batch ID 목록을 사용한다. weekly/monthly는 하위 report ID·버전·결과·누락 날짜를 입력으로 사용한다. 각 보고서의 전체 계보는 manifest에 보관한다.
@@ -105,7 +105,7 @@ Airflow schedule
     → validate result
     → persist report
 ```
-- 로컬에서 DAG와 호스트 Collector 호출 계약을 구현하고 테스트한다. 호스트 CLI 수동 실행도 지원하며 운영 Airflow 접속은 로컬 완료 조건이 아니다.
+- 이 저장소에서는 호스트 HTTP API 호출 계약을 구현하고 테스트한다. Airflow DAG는 별도 프로젝트에서 관리한다. 호스트 CLI 수동 실행도 지원하며 운영 Airflow 접속은 로컬 완료 조건이 아니다.
 - 초기에는 단순한 Airflow Task 순차 실행으로 시작할 수 있다. 장시간 작업·상태 추적이 필요하면 비동기 큐/단일 Worker로 확장.
 - 수집은 짧은 주기, daily는 매일, weekly는 월요일, monthly는 매월 1일에 등록한다. 날짜를 명시해 재시도가 다음 기간으로 이동하지 않게 한다. 스케줄 시각보다 하위 일일 보고서 완료 의존성을 우선하고 모든 AI 작업은 같은 Worker/잠금을 사용한다.
 - Airflow 실패/재시도와 Codex 작업 재시도의 중복 실행을 방지한다.
@@ -142,7 +142,7 @@ Phase 1~3의 로컬 구현·검증 완료 후 진행한다.
 배포·DB 적용·스케줄 활성화는 로컬 구현과 별도 작업이다. 운영 검증 전에는 전체 시스템의 운영 검증 완료를 선언하지 않는다. AIOps 중지·스케줄 비활성화 등 배포 복구 절차도 문서화한다.
 
 ## 13. Codex 작업 지시
-> Phase 3만 로컬에서 구현하라. 가짜 Provider와 전용 테스트 PostgreSQL로 전체 흐름을 검증하고, Airflow DAG와 배포·복구 절차를 준비하라. 운영 서버 접근을 로컬 완료 조건으로 삼지 말라. Phase 2의 정제된 JSON 배치를 입력으로 받고, 검증된 공식 Codex SDK 또는 CLI를 통해 읽기 전용 분석을 수행하라. 전역 동시 실행 1개, 구조화된 결과 검증, 상태 관리, 근거 추적, 오류 복구를 우선 구현하라. 실제 운영 DB 변경·서비스 조치·파일 수정은 승인 없이 하지 말라.
+> Phase 3만 로컬에서 구현하라. 가짜 Provider와 전용 테스트 PostgreSQL로 전체 흐름을 검증하고, 외부 Airflow 프로젝트를 위한 API 호출 계약과 배포·복구 절차를 준비하라. 운영 서버 접근을 로컬 완료 조건으로 삼지 말라. Phase 2의 정제된 JSON 배치를 입력으로 받고, 검증된 공식 Codex SDK 또는 CLI를 통해 읽기 전용 분석을 수행하라. 전역 동시 실행 1개, 구조화된 결과 검증, 상태 관리, 근거 추적, 오류 복구를 우선 구현하라. 실제 운영 DB 변경·서비스 조치·파일 수정은 승인 없이 하지 말라.
 
 ## 14. PostgreSQL·Worker 구현 상태
-public.aiops_ 테이블 SQL, PostgreSQL 보고서/배치 참조 저장소, 중복 방지 작업 큐·우선순위·시도 이력·백오프·단일 Worker·소유권 기반 결과 확정·복구와 systemd 예제를 구현했다. 실제 PostgreSQL 17의 임시 DB 및 가짜 Provider로 검증했다. 운영 DB 적용·서비스 등록·Airflow·FastAPI·실 AI 호출 통합 검증은 아직 수행하지 않았다. 서버 적용 순서는 [POSTGRES_WORKER.md](POSTGRES_WORKER.md), 검증은 [PHASE3_VALIDATION.md](PHASE3_VALIDATION.md)를 따른다.
+public.aiops_ 테이블 SQL, PostgreSQL 보고서/배치 참조 저장소, 중복 방지 작업 큐·우선순위·시도 이력·백오프·단일 Worker·소유권 기반 결과 확정·복구와 systemd 예제를 구현했다. 실제 PostgreSQL 17의 임시 DB 및 가짜 Provider로 검증했다. 호스트 FastAPI API도 구현했다. Airflow DAG는 별도 프로젝트에서 관리하며 실제 운영 API 연결은 아직 검증하지 않았다. 상세 연결은 [AIRFLOW_API.md](AIRFLOW_API.md)를 따른다. 서버 적용 순서는 [POSTGRES_WORKER.md](POSTGRES_WORKER.md), 검증은 [PHASE3_VALIDATION.md](PHASE3_VALIDATION.md)를 따른다.

@@ -2,7 +2,11 @@
 
 운영에서는 전용 DB를 다시 만든 상태다. 아래 명령으로 최신 테이블을 초기화한 뒤 Worker를 검증한다. 현재 구현은 로컬의 실제 PostgreSQL 17과 가짜 AI Provider로 검증했다. 기존 서비스 테이블·설정·방화벽을 바꾸지 않는다.
 
-## 일반 운영에서 사용할 명령
+## 운영 기준: Docker Airflow → API
+
+운영은 [AIRFLOW_API.md](AIRFLOW_API.md)를 따른다. API는 호스트 9023에서 상시 실행하고, Docker Airflow가 HTTP로 수집·보고서 접수·Worker 1회 실행을 호출한다. 별도 상시 Worker 서비스는 필요 없다. 아래 CLI·systemd 설명은 수동 진단 또는 대체 운영 방식이다.
+
+## 수동 진단에서 사용할 명령
 
 `.env`에 `AIOPS_SOURCES_CONFIG=config/log_sources.yaml`을 한 번 설정한다.
 
@@ -20,7 +24,7 @@ uv run aiops --env-file .env report run --type daily
 uv run aiops --env-file .env status
 ```
 
-Worker 서비스는 아래 systemd 안내로 한 번 등록한다. 서비스 등록 전 수동 검증에만 `worker --once`를 사용한다. 주간·월간은 `report run --type weekly`와 `report run --type monthly`를 사용한다. 하위 일일 분석이 완료된 후 요청한다. `report run`은 작업 접수이며 완료 상태는 `status`에서 확인한다. 기본 일일 대상은 한국 시간 기준 전날이다.
+운영 Worker는 Airflow가 API로 한 번씩 실행한다. CLI 수동 검증에는 `worker --once`를 사용한다. 주간·월간은 `report run --type weekly`와 `report run --type monthly`를 사용한다. 하위 일일 분석이 완료된 후 요청한다. `report run`은 작업 접수이며 완료 상태는 `status`에서 확인한다. 기본 일일 대상은 한국 시간 기준 전날이다.
 
 수집 후 DB 장애 시 파일은 유지하고 종료 코드 11을 반환하며, 다음 수집에서 미등록 배치를 자동 재등록한다. 아래의 세부 DB·큐 명령은 수동 진단과 복구 절차이며 일반 운영 시 전부 실행하는 순서가 아니다.
 
@@ -37,7 +41,7 @@ jobs submit    → PostgreSQL 작업 큐
 
 `AIOPS_DATABASE_URL`이 없으면 기존 SQLite 보고서 모드가 유지된다. 설정하면 보고서 원본과 큐는 PostgreSQL을 사용한다. Collector는 계속 DB·Codex 없이 동작하며 체크포인트는 SQLite에 둔다. 같은 DB를 사용하는 모든 실행은 **같은 호스트·같은 AIOPS_DATA_DIR**를 사용한다. 여러 호스트의 로컬 파일을 공유하는 구조는 지원하지 않는다.
 
-백엔드 HTTP 9023·향후 프론트 4003은 별도다. 이번 Worker는 HTTP 포트를 열지 않으며 기존 PostgreSQL 13245에 접속한다. FastAPI·Airflow DAG·자동 스케줄은 아직 설치하지 않는다.
+백엔드 HTTP 9023·향후 프론트 4003은 별도다. 이번 Worker는 HTTP 포트를 열지 않으며 기존 PostgreSQL 13245에 접속한다. FastAPI API를 제공하며 Airflow DAG는 별도 프로젝트에서 관리한다.
 
 ## 이미 DB를 다시 만든 현재 운영 환경
 
@@ -149,7 +153,7 @@ DB 모드에서는 기존 `report run`도 jobs submit의 별칭으로 **큐 등�
 
 종류·기간·입력 fingerprint가 같으면 같은 report version과 job ID를 재사용한다. 이미 완료된 결과는 다시 Codex에 보내지 않는다. 요청 모델은 submit 당시 manifest에 고정하므로 Worker의 기본 모델이 나중에 달라져도 바뀌지 않는다. 분석 지침이 변경되었거나 입력이 오래됐으면 stale_input으로 취소하고 해당 기간을 다시 submit한다.
 
-## 6. 상시 Worker
+## 6. 선택 사항: 상시 Worker (현재 운영 기본 방식 아님)
 
 수동 확인:
 

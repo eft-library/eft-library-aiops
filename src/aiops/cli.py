@@ -32,6 +32,9 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
         "--env-file", type=Path, help="Explicit dotenv file (existing environment wins)"
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    serve = commands.add_parser("serve", help="Run the Airflow HTTP API on port 9023")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=9023)
     commands.add_parser("setup", help="Initialize DB and register existing local data")
     commands.add_parser("status", help="Show collection, database and recent jobs")
     commands.add_parser("doctor", help="Check local Python, Codex and login status")
@@ -137,7 +140,20 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
             args.config = Path(os.getenv(
                 "AIOPS_SOURCES_CONFIG", "config/log_sources.fixture.yaml"
             ))
-        if args.command == "setup":
+        if args.command == "serve":
+            import uvicorn
+
+            from aiops.api import create_app
+
+            app = create_app(
+                settings, token=os.getenv("AIOPS_API_TOKEN", ""),
+                sources_config=Path(os.getenv(
+                    "AIOPS_SOURCES_CONFIG", "config/log_sources.yaml"
+                )),
+            )
+            uvicorn.run(app, host=args.host, port=args.port, workers=1)
+            return 0
+        elif args.command == "setup":
             from aiops.operations import setup
 
             output = setup(settings)

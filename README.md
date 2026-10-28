@@ -1,8 +1,8 @@
 # eft-library-aiops
 
-EFT Library의 로그와 서버 상태를 수집하고 Codex로 장애 원인과 개선 방향을 분석하는 Python 도구입니다. 현재 **Phase 1의 Codex 분석 연결과 Phase 2의 로그·시스템 상태 수집**을 구현했습니다. 일일·주간·월간 입력 통합과 버전별 보고서 저장도 지원합니다. PostgreSQL 보고서 저장·작업 큐·단일 Worker도 지원합니다. Airflow 자동 스케줄과 웹 조회 API는 이후 단계에서 연결합니다.
+EFT Library의 로그와 서버 상태를 수집하고 Codex로 장애 원인과 개선 방향을 분석하는 Python 도구입니다. 현재 **Phase 1의 Codex 분석 연결과 Phase 2의 로그·시스템 상태 수집**을 구현했습니다. 일일·주간·월간 입력 통합과 버전별 보고서 저장도 지원합니다. PostgreSQL 보고서 저장·작업 큐·단일 Worker도 지원합니다. 외부 Airflow 프로젝트에서 호출할 HTTP API도 제공합니다.
 
-향후 AIOps 웹 서비스의 기본 포트는 **백엔드(FastAPI) 9023**, **프론트엔드(추가 시) 4003**으로 사용합니다. 현재 CLI 수집·분석은 서버 포트를 열지 않습니다.
+향후 AIOps 웹 서비스의 기본 포트는 **백엔드(FastAPI) 9023**, **프론트엔드(추가 시) 4003**으로 사용합니다. `aiops serve`는 백엔드 9023 포트를 사용하며 CLI 수집·분석은 포트를 열지 않습니다.
 
 ## 준비
 
@@ -25,29 +25,26 @@ uv sync --locked
 
 ### 운영 실행 흐름
 
-`.env`에 DB 접속 정보와 `AIOPS_SOURCES_CONFIG=config/log_sources.yaml`을 설정합니다. 기존 계정·비밀번호와 데이터 경로는 유지합니다.
+운영 기준은 **Docker Airflow → 호스트 AIOps API(9023)**입니다. Airflow에 프로젝트·로그·Codex 인증 볼륨을 공유하지 않습니다. Worker는 API 호출 시 한 건씩 실행합니다.
 
-```sh
-# 최초 준비: 테이블 초기화 + 기존 보고서 이전 + 배치 등록 (재실행 가능)
-uv run aiops --env-file .env setup
+`.env`에 기존 DB 설정과 아래 값을 지정합니다.
 
-# 수집: Codex 호출 없이 파일 저장 + DB 메타데이터 자동 등록
-uv run aiops --env-file .env collect --all
-
-# 전날 일일 분석 요청: 입력 준비 + 작업 등록
-uv run aiops --env-file .env report run --type daily
-
-# 수집 경로·최근 수집 시각·DB·최근 작업과 오류 확인
-uv run aiops --env-file .env status
+```dotenv
+AIOPS_SOURCES_CONFIG=config/log_sources.yaml
+AIOPS_API_TOKEN=직접_생성한_비밀키
 ```
 
-Worker는 [서비스 등록 안내](docs/POSTGRES_WORKER.md#6-상시-worker)에 따라 한 번 등록해 상시 실행합니다. 서비스를 등록하기 전 수동 검증에서는 `uv run aiops --env-file .env worker --once`로 작업 한 개를 처리할 수 있습니다. **실제 Codex 호출은 Worker에서 발생합니다.** `report run` 성공은 작업 접수이며 분석 완료는 `status`에서 확인합니다. DB 없는 로컬 모드의 `report run`은 직접 Codex를 호출합니다.
+```sh
+# 최초 설치만: 테이블 초기화와 기존 데이터 등록
+uv run aiops --env-file .env setup
 
-Airflow는 수집 명령과 일일·주간·월간 `report run --type daily|weekly|monthly`를 각각의 주기로 호출하면 됩니다. 별도 `sync-batches`, `jobs submit`, `report prepare`는 필요 없습니다. 큐 접수와 분석 완료는 별개이므로 상위 보고서는 하위 일일 분석이 완료된 뒤 요청합니다. 자동 DAG는 아직 제공하지 않습니다.
+# API 시작. 기본 포트 9023. 이 프로세스는 계속 실행되어야 합니다.
+uv run aiops --env-file .env serve --host 0.0.0.0
+```
 
-수집 파일은 DB 등록에 실패해도 보존되며 다음 수집 시 누락된 등록을 자동 재시도합니다. 이 경우 종료 코드는 11입니다. 부분 수집은 10이며 결과의 coverage를 확인합니다. `status`에 배치가 없으면 데이터 경로와 수집 여부를 확인합니다. 전날 데이터가 없을 때는 분석 요청이 `no_report_input`으로 거부됩니다. `--date YYYY-MM-DD`로 다른 대상 날짜를 지정할 수 있습니다.
+이후에는 Airflow가 수집·보고서 접수·Worker 실행을 HTTP로 호출합니다. **[API 호출 안내](docs/AIRFLOW_API.md)**를 참고하세요. 별도 상시 Worker 서비스는 필요하지 않습니다. Airflow DAG와 스케줄은 별도 프로젝트에서 관리합니다.
 
-`db`, `jobs`, `report prepare` 세부 명령은 진단·복구용으로 유지합니다. Codex 설치·로그인 점검은 `doctor`, 샘플 연결 검증은 `analyze --input config/sample.json`을 사용합니다.
+수동 진단은 `collect --all`, `report run --type daily`, `worker --once`, `status`로 할 수 있습니다. 수집은 DB 등록까지 자동 처리하고, report run은 입력 준비·큐 등록을 통합합니다. DB 없는 로컬 모드에서는 report run이 직접 Codex를 호출합니다. `db`, `jobs`, `report prepare`는 관리·복구용입니다.
 
 ### .env를 사용하는 경우 (선택)
 
@@ -156,13 +153,13 @@ uv run aiops --env-file .env report list
 
 보고서는 `aiops_data/reports/`에 저장합니다. 같은 입력의 완료된 결과는 재사용하고, 지연 로그나 하위 보고서가 바뀌면 새 버전으로 분석합니다. 누락·오래된 하위 보고서는 `coverage_complete: false`로 표시하고 종료 코드 10을 반환할 수 있습니다. `report list`의 `stale`로 갱신 필요 여부를 확인합니다.
 
-커버리지의 기본 기대 수집 주기는 5분이며 실제 주기가 다르면 `--interval-minutes`로 맞춥니다. **Airflow 자동 스케줄과 상시 Worker는 자동 설치하지 않습니다. Worker 코드는 제공하며 운영 등록은 아래 PostgreSQL 안내를 따릅니다.** 기간·재실행·기존 데이터 호환·저장/복구의 상세 기준은 [정기 보고서 안내](docs/REPORTING.md)를 참고하세요.
+커버리지의 기본 기대 수집 주기는 5분이며 실제 주기가 다르면 `--interval-minutes`로 맞춥니다. **Airflow DAG는 별도 프로젝트에서 관리합니다. API 호출 계약은 [API 안내](docs/AIRFLOW_API.md)를 따릅니다.** 기간·재실행·기존 데이터 호환·저장/복구의 상세 기준은 [정기 보고서 안내](docs/REPORTING.md)를 참고하세요.
 
 ## PostgreSQL와 단일 Worker (Phase 3)
 
 PostgreSQL 테이블은 **public 스키마의 aiops_ 접두사**를 사용합니다. DB를 이미 만들었다면 .env의 dbname을 확인한 뒤 `setup`을 실행하면 됩니다. 기존 aiops 스키마 설치도 데이터를 유지하며 public으로 이전합니다. 정상 점검 결과는 `schema: public`, `migration: 2`입니다.
 
-서버 최초 적용은 [PostgreSQL·Worker 안내](docs/POSTGRES_WORKER.md)의 **DB/역할 준비 → .env 설정 → setup → Worker 서비스 등록** 순서를 따릅니다. 스키마는 [생성 SQL](src/aiops/storage/sql/001_initial.sql)로 준비했으며 운영 DB에 자동 적용하지 않습니다.
+서버 최초 적용은 [PostgreSQL·Worker 안내](docs/POSTGRES_WORKER.md)의 **DB/역할 준비 → .env 설정 → setup → API 실행 → Airflow 연결** 순서를 따릅니다. 스키마는 [생성 SQL](src/aiops/storage/sql/001_initial.sql)로 준비했으며 운영 DB에 자동 적용하지 않습니다.
 
 ```dotenv
 # .env에 추가. 실제 DB 비밀번호를 사용하고 이 파일은 Git에 넣지 않습니다.
@@ -179,7 +176,7 @@ uv run aiops --env-file .env status
 
 DB 모드의 `report run`은 즉시 AI 실행 대신 **큐에 등록**합니다. 실제 Codex 호출은 `worker --once` 또는 상시 `worker`에서 수행합니다. 같은 입력의 작업은 중복 등록하지 않으며 완료 결과를 재사용합니다. 요청 당시 모델을 유지하고, 인증·사용량 제한은 자동 반복하지 않습니다. 데이터가 오래되면 분석 대신 `CANCELLED/stale_input`으로 남기므로 해당 기간의 `report run`을 다시 실행합니다.
 
-`collect`는 파일 저장을 마친 뒤 PostgreSQL이 설정되어 있으면 배치 정보를 자동 등록합니다. DB 등록이 실패해도 수집 파일은 보존됩니다. AIOPS_DATABASE_URL을 설정하지 않으면 기존 로컬 SQLite 보고서 모드가 유지됩니다. DB 오류 종료 코드는 **11**이며 연결값과 서버 오류 원문을 출력하지 않습니다. [systemd 예제](deploy/eft-aiops-worker.service)는 경로/PATH 확인 후 운영자가 등록합니다. 아직 Airflow DAG나 API 서버를 실행하지 않습니다.
+`collect`는 파일 저장을 마친 뒤 PostgreSQL이 설정되어 있으면 배치 정보를 자동 등록합니다. DB 등록이 실패해도 수집 파일은 보존됩니다. AIOPS_DATABASE_URL을 설정하지 않으면 기존 로컬 SQLite 보고서 모드가 유지됩니다. DB 오류 종료 코드는 **11**이며 연결값과 서버 오류 원문을 출력하지 않습니다. 기본 운영 경로는 [Airflow → API](docs/AIRFLOW_API.md)입니다. 기존 systemd Worker 예제는 선택적인 대체 방식입니다.
 
 ## 결과와 오류
 

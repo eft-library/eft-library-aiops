@@ -38,3 +38,10 @@
 사용자 요청에 따라 기본 PostgreSQL 저장소를 public.aiops_* 테이블로 전환했다. 마이그레이션 버전은 2다. 새 DB 생성과 기존 aiops 스키마의 데이터 보존 이전을 모두 실제 임시 PostgreSQL에서 검증했다. 기존 public.reports 및 같은 일반 이름의 identity sequence/index가 있어도 보존됐고, public.aiops_* 대상이 이미 있으면 병합/덮어쓰기 없이 전체 이전을 중단했다. 별도 aiops 객체가 남아 있으면 해당 스키마를 삭제하지 않았다.
 
 전체 테스트 172 passed, 1 skipped. SQL·코드 변경을 운영 DB에 직접 적용하지 않았다. 사용자가 다시 만든 운영 DB에는 최신 db init으로 public 테이블을 바로 생성한다.
+
+## Docker Airflow → 호스트 API
+
+- FastAPI의 인증 필수 HTTP API를 추가했다. 기본 포트는 9023이며 상시 Worker 대신 `/v1/worker/run-once`가 동기적으로 한 건을 처리한다. HTTP와 CLI는 같은 DB Worker 잠금을 공유한다.
+- 실제 임시 PostgreSQL + 가짜 Provider로 HTTP 접수·중복 요청 재사용·한 건 실행·결과 조회·빈 큐·잠금 충돌·수집 후 DB 등록·데이터 없음 오류를 검증했다. API 시작 조건과 DB 오류의 접속 정보 미노출도 검증했다.
+- API는 동기 호출이다. HTTP timeout이 작업 취소나 실패를 의미하지 않으므로 job_id로 완료를 확인한다. Airflow DAG와 스케줄은 별도 프로젝트에서 관리하며, 하위 보고서 누락은 기존 데이터 품질 계약으로 표시한다.
+- 배포 설정과 HTTP 계약은 [AIRFLOW_API.md](AIRFLOW_API.md)를 따른다. 운영 Docker에서 호스트 9023까지의 실제 네트워크 연결·인증·Codex 호출은 별도 운영 검증 대상이다.
