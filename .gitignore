@@ -227,3 +227,5 @@ auth.json
 
 # sample
 prd_logs/
+# PostgreSQL local credential file
+.pgpass

@@ -1,6 +1,6 @@
 # eft-library-aiops
 
-EFT Library의 로그와 서버 상태를 수집하고 Codex로 장애 원인과 개선 방향을 분석하는 Python 도구입니다. 현재 **Phase 1의 Codex 분석 연결과 Phase 2의 로그·시스템 상태 수집**을 구현했습니다. 일일·주간·월간 입력 통합과 버전별 보고서 저장도 지원합니다. 상시 단일 Worker·PostgreSQL 결과 저장·Airflow 연동과 웹 조회 API는 이후 단계에서 구현합니다.
+EFT Library의 로그와 서버 상태를 수집하고 Codex로 장애 원인과 개선 방향을 분석하는 Python 도구입니다. 현재 **Phase 1의 Codex 분석 연결과 Phase 2의 로그·시스템 상태 수집**을 구현했습니다. 일일·주간·월간 입력 통합과 버전별 보고서 저장도 지원합니다. PostgreSQL 보고서 저장·작업 큐·단일 Worker도 지원합니다. Airflow 자동 스케줄과 웹 조회 API는 이후 단계에서 연결합니다.
 
 향후 AIOps 웹 서비스의 기본 포트는 **백엔드(FastAPI) 9023**, **프론트엔드(추가 시) 4003**으로 사용합니다. 현재 CLI 수집·분석은 서버 포트를 열지 않습니다.
 
@@ -133,6 +133,8 @@ uv run aiops --env-file .env analyze --input <출력된_snapshot.json_경로>
 
 ## 일일·주간·월간 보고서
 
+아래 직접 실행 설명은 기본 로컬 SQLite 모드 기준입니다. PostgreSQL 설정 시 `report run`은 큐 등록으로 바뀌며 다음 절의 Worker가 처리합니다.
+
 한국 시간 기준으로 **일일은 전날 데이터**, **주간은 지난 월~일의 일일 보고서 7개**, **월간은 지난달의 일일 보고서 전체**를 사용합니다. 월간의 주간 보고서는 보조 참고이며 중복 합산하지 않습니다. 수집 배치 하나를 하루로 간주하지 않습니다.
 
 ```sh
@@ -154,7 +156,34 @@ uv run aiops --env-file .env report list
 
 보고서는 `aiops_data/reports/`에 저장합니다. 같은 입력의 완료된 결과는 재사용하고, 지연 로그나 하위 보고서가 바뀌면 새 버전으로 분석합니다. 누락·오래된 하위 보고서는 `coverage_complete: false`로 표시하고 종료 코드 10을 반환할 수 있습니다. `report list`의 `stale`로 갱신 필요 여부를 확인합니다.
 
-커버리지의 기본 기대 수집 주기는 5분이며 실제 주기가 다르면 `--interval-minutes`로 맞춥니다. **아직 Airflow 자동 스케줄과 상시 Worker는 설치하지 않습니다.** 기간·재실행·기존 데이터 호환·저장/복구의 상세 기준은 [정기 보고서 안내](docs/REPORTING.md)를 참고하세요.
+커버리지의 기본 기대 수집 주기는 5분이며 실제 주기가 다르면 `--interval-minutes`로 맞춥니다. **Airflow 자동 스케줄과 상시 Worker는 자동 설치하지 않습니다. Worker 코드는 제공하며 운영 등록은 아래 PostgreSQL 안내를 따릅니다.** 기간·재실행·기존 데이터 호환·저장/복구의 상세 기준은 [정기 보고서 안내](docs/REPORTING.md)를 참고하세요.
+
+## PostgreSQL와 단일 Worker (Phase 3)
+
+서버 최초 적용은 [PostgreSQL·Worker 안내](docs/POSTGRES_WORKER.md)의 **DB/역할 생성 → .env 설정 → db init → 기존 이력 이전 → 단일 작업 검증** 순서를 따릅니다. 스키마는 [생성 SQL](src/aiops/storage/sql/001_initial.sql)로 준비했으며 운영 DB에 자동 적용하지 않습니다.
+
+```dotenv
+# .env에 추가. 실제 DB 비밀번호를 사용하고 이 파일은 Git에 넣지 않습니다.
+AIOPS_DATABASE_URL="host=127.0.0.1 port=13245 dbname=eft_library_aiops user=aiops_app"
+PGPASSWORD="DB_비밀번호"
+```
+
+```sh
+uv sync --locked
+uv run aiops --env-file .env db init
+uv run aiops --env-file .env db doctor
+uv run aiops --env-file .env db import-sqlite
+uv run aiops --env-file .env db sync-batches
+
+# 실제 데이터가 있는 종료된 날짜로 지정
+uv run aiops --env-file .env jobs submit --type daily --date YYYY-MM-DD --config config/log_sources.yaml
+uv run aiops --env-file .env jobs list
+uv run aiops --env-file .env worker --once
+```
+
+DB 모드의 `report run`은 즉시 AI 실행 대신 **큐에 등록**합니다. 실제 Codex 호출은 `worker --once` 또는 상시 `worker`에서 수행합니다. 같은 입력의 작업은 중복 등록하지 않으며 완료 결과를 재사용합니다. 요청 당시 모델을 유지하고, 인증·사용량 제한은 자동 반복하지 않습니다. 데이터가 오래되면 분석 대신 `CANCELLED/stale_input`으로 남기므로 해당 기간을 다시 submit합니다.
+
+`collect`는 여전히 PostgreSQL과 독립적으로 동작합니다. AIOPS_DATABASE_URL을 설정하지 않으면 기존 로컬 SQLite 보고서 모드가 유지됩니다. DB 오류 종료 코드는 **11**이며 연결값과 서버 오류 원문을 출력하지 않습니다. [systemd 예제](deploy/eft-aiops-worker.service)는 경로/PATH 확인 후 운영자가 등록합니다. 아직 Airflow DAG나 API 서버를 실행하지 않습니다.
 
 ## 결과와 오류
 
@@ -186,6 +215,6 @@ uv run pytest -q
 AIOPS_RUN_INTEGRATION=1 uv run pytest -q -m integration
 ```
 
-기본 테스트는 실제 Codex·네트워크·Docker daemon 없이 실행합니다. 정기 보고서는 기간 경계·윤년·지연 도착·버전 재사용·누락 전파·월간 입력 제한도 검증합니다. Phase 2는 증분·회전·덮어쓰기·미완성 줄·중단 복구·마스킹·HTTP 집계와 시스템/Docker 대역도 검증합니다. 가짜 Provider, CLI 오류 코드, 입력 제한, 결과 검증, 비밀정보 미기록, 프로세스 간 잠금, 타임아웃 시 자식 프로세스 종료를 검증합니다.
+기본 테스트는 실제 Codex·PostgreSQL·네트워크·Docker daemon 없이 실행합니다. 실제 PostgreSQL 검증은 [별도 opt-in](docs/POSTGRES_WORKER.md)입니다. 정기 보고서는 기간 경계·윤년·지연 도착·버전 재사용·누락 전파·월간 입력 제한도 검증합니다. Phase 2는 증분·회전·덮어쓰기·미완성 줄·중단 복구·마스킹·HTTP 집계와 시스템/Docker 대역도 검증합니다. 가짜 Provider, CLI 오류 코드, 입력 제한, 결과 검증, 비밀정보 미기록, 프로세스 간 잠금, 타임아웃 시 자식 프로세스 종료를 검증합니다.
 
 [보안 및 배포 안내](docs/SECURITY.md), [입력 계약 초안](docs/BATCH_CONTRACT.md), [Phase 1](docs/PHASE1.md), [Phase 2](docs/PHASE2.md), [Phase 3](docs/PHASE3.md)를 참고하세요.

@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict
 
 
 class ErrorKind(StrEnum):
+    DATABASE = 'database'
     CONFIG = 'configuration'
     AUTH = 'authentication'
     NETWORK = 'network'

@@ -1,0 +1,22 @@
+[Unit]
+Description=EFT Library AIOps single analysis Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/aiops/eft-library-aiops
+# Adjust this PATH to contain the actual directories of both node and codex.
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/home/aiops/eft-library-aiops/.venv/bin/aiops --env-file /home/aiops/eft-library-aiops/.env worker
+Restart=on-failure
+RestartSec=10
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=20
+SuccessExitStatus=130
+
+[Install]
+WantedBy=multi-user.target

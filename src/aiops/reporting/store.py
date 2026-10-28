@@ -166,3 +166,20 @@ class ReportStore:
                 (kind, kind),
             )
         ]
+
+    def completed_overlapping(self, kind, start, end):
+        return [
+            dict(row)
+            for row in self.db.execute(
+                "SELECT * FROM reports WHERE kind=? AND status='COMPLETED' AND period_start<? AND period_end>? ORDER BY period_start,revision DESC",
+                (kind, end, start),
+            )
+        ]
+
+
+def open_report_store(root, settings):
+    if settings.database_url:
+        from aiops.storage.reports import PostgresReportStore
+
+        return PostgresReportStore(root, settings)
+    return ReportStore(root)

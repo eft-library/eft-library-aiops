@@ -5,7 +5,7 @@ import shutil
 import sys
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -73,7 +73,13 @@ class CodexProvider:
             raise ProviderError(ErrorKind.CONFIG)
         job_id = str(uuid4())
         started = time.monotonic()
-        with execution_lock(self.settings.data_dir):
+        if self.settings.database_url:
+            from aiops.storage.postgres import CODEX_LOCK, advisory_lock
+
+            gate = advisory_lock(self.settings, CODEX_LOCK)
+        else:
+            gate = nullcontext()
+        with gate, execution_lock(self.settings.data_dir):
             status = "FAILED"
             error = None
             thread_id = None

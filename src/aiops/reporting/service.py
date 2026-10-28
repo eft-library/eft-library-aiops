@@ -8,7 +8,7 @@ from aiops.data_permissions import data_directory
 from aiops.providers.base import AnalysisRequest, ErrorKind, ProviderError
 from aiops.reporting.daily import daily_input
 from aiops.reporting.periods import for_period
-from aiops.reporting.store import ReportStore, encoded
+from aiops.reporting.store import encoded, open_report_store
 
 
 def fit_input(snapshot, limit):
@@ -125,9 +125,13 @@ class ReportingService:
         self.reports = None
 
     def execute(self, kind, date=None, *, analyze=False):
+        if analyze and self.settings.database_url:
+            raise ValueError(
+                "PostgreSQL analysis is executed through jobs and the single Worker"
+            )
         period = for_period(kind, date, now=self.now)
         with collector_lock(self.root / "reports"):
-            self.reports = ReportStore(self.root / "reports")
+            self.reports = open_report_store(self.root / "reports", self.settings)
             try:
                 with collector_lock(self.root / "collection"):
                     collection = BatchStore(self.root / "collection")
@@ -212,7 +216,7 @@ class ReportingService:
 
     def list(self, kind=None):
         with collector_lock(self.root / "reports"):
-            self.reports = ReportStore(self.root / "reports")
+            self.reports = open_report_store(self.root / "reports", self.settings)
             try:
                 with collector_lock(self.root / "collection"):
                     collection = BatchStore(self.root / "collection")
@@ -245,10 +249,9 @@ class ReportingService:
         return available, missing, outdated
 
     def _weekly_context(self, period, collection):
-        rows = self.reports.db.execute(
-            "SELECT * FROM reports WHERE kind='weekly' AND status='COMPLETED' AND period_start<? AND period_end>? ORDER BY period_start,revision DESC",
-            (period.end.date().isoformat(), period.label),
-        ).fetchall()
+        rows = self.reports.completed_overlapping(
+            "weekly", period.label, period.end.date().isoformat()
+        )
         selected = {}
         for value in rows:
             row = dict(value)
@@ -340,3 +343,21 @@ class ReportingService:
             ],
         }
         return snapshot, manifest
+
+    def is_current(self, report_id):
+        with collector_lock(self.root / "reports"):
+            self.reports = open_report_store(self.root / "reports", self.settings)
+            try:
+                row = self.reports.row(report_id)
+                if row is None:
+                    raise ValueError("unknown report")
+                with collector_lock(self.root / "collection"):
+                    collection = BatchStore(self.root / "collection")
+                    try:
+                        collection.recover()
+                        collection.index_existing()
+                        return self._current(row, collection)
+                    finally:
+                        collection.close()
+            finally:
+                self.reports.close()

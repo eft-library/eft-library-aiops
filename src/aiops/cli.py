@@ -4,6 +4,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import psycopg
 from dotenv import load_dotenv
 
 from aiops.config import Settings
@@ -11,6 +12,7 @@ from aiops.providers.base import AIProvider, AnalysisRequest, ErrorKind, Provide
 from aiops.providers.codex import CodexProvider, doctor
 
 EXIT_CODES = {
+    ErrorKind.DATABASE: 11,
     ErrorKind.CONFIG: 2,
     ErrorKind.AUTH: 3,
     ErrorKind.NETWORK: 4,
@@ -91,6 +93,35 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
         "list", help="List report revisions and data staleness"
     )
     listing.add_argument("--type", choices=["daily", "weekly", "monthly"])
+    db = commands.add_parser("db", help="Explicit PostgreSQL setup and migration tools")
+    db.add_argument(
+        "db_action",
+        choices=["print-sql", "init", "doctor", "import-sqlite", "sync-batches"],
+    )
+    jobs = commands.add_parser("jobs", help="Persistent PostgreSQL analysis queue")
+    job_actions = jobs.add_subparsers(dest="jobs_action", required=True)
+    job_submit = job_actions.add_parser("submit")
+    job_submit.add_argument(
+        "--type", choices=["daily", "weekly", "monthly"], required=True
+    )
+    job_submit.add_argument("--date")
+    job_submit.add_argument(
+        "--config", type=Path, default=Path("config/log_sources.fixture.yaml")
+    )
+    job_submit.add_argument("--interval-minutes", type=int, default=5)
+    job_submit.add_argument(
+        "--priority", choices=["critical", "high", "normal", "low"], default="normal"
+    )
+    job_submit.add_argument("--max-attempts", type=int, default=3)
+    job_actions.add_parser("list")
+    for action in ("retry", "cancel"):
+        command = job_actions.add_parser(action)
+        command.add_argument("job_id")
+    worker = commands.add_parser(
+        "worker", help="Run a single PostgreSQL analysis Worker"
+    )
+    worker.add_argument("--once", action="store_true")
+    worker.add_argument("--poll-seconds", type=float, default=5)
     args = parser.parse_args(argv)
     try:
         if args.env_file:
@@ -98,7 +129,57 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
                 raise ProviderError(ErrorKind.CONFIG)
             load_dotenv(args.env_file, override=False)
         settings = Settings.from_env()
-        if args.command == "doctor":
+        if args.command == "db":
+            from aiops.storage import postgres
+
+            if args.db_action == "print-sql":
+                print(postgres.migration_sql())
+                return 0
+            if args.db_action == "init":
+                output = postgres.initialize(settings)
+            elif args.db_action == "doctor":
+                output = postgres.doctor(settings)
+            elif args.db_action == "sync-batches":
+                from aiops.storage.import_sqlite import sync_batches
+
+                output = sync_batches(settings)
+            else:
+                from aiops.storage.import_sqlite import import_sqlite
+
+                output = import_sqlite(settings)
+        elif args.command == "jobs":
+            from aiops.storage.jobs import JobQueue, submit
+
+            if args.jobs_action == "submit":
+                output = submit(
+                    settings,
+                    args.type,
+                    args.date,
+                    config=args.config,
+                    interval_minutes=args.interval_minutes,
+                    priority=args.priority,
+                    max_attempts=args.max_attempts,
+                )
+            else:
+                queue = JobQueue(settings)
+                try:
+                    output = (
+                        queue.list()
+                        if args.jobs_action == "list"
+                        else getattr(queue, args.jobs_action)(args.job_id)
+                    )
+                finally:
+                    queue.close()
+        elif args.command == "worker":
+            from aiops.worker import run
+
+            return run(
+                settings,
+                once=args.once,
+                poll_seconds=args.poll_seconds,
+                provider=provider,
+            )
+        elif args.command == "doctor":
             output = doctor(settings)
         elif args.command == "collect":
             from aiops.collectors.config import load_config
@@ -114,6 +195,18 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
 
             if args.report_action == "list":
                 output = ReportingService(settings).list(args.type)
+            elif args.report_action == "run" and settings.database_url:
+                from aiops.storage.jobs import submit
+
+                output = submit(
+                    settings,
+                    args.type,
+                    args.date,
+                    config=args.config,
+                    interval_minutes=args.interval_minutes,
+                )
+                print(json.dumps(output, ensure_ascii=False, indent=2))
+                return 0
             else:
                 output = ReportingService(
                     settings,
@@ -145,6 +238,9 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
     except ProviderError as exc:
         print(json.dumps({"error": exc.kind.value}), file=sys.stderr)
         return EXIT_CODES[exc.kind]
+    except psycopg.Error:
+        print(json.dumps({"error": "database"}), file=sys.stderr)
+        return 11
     except (OSError, ValueError, sqlite3.Error):
         print(json.dumps({"error": ErrorKind.CONFIG.value}), file=sys.stderr)
         return 2
