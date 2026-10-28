@@ -229,3 +229,9 @@ auth.json
 prd_logs/
 # PostgreSQL local credential file
 .pgpass
+
+# API restart script output
+/log.out
+
+# Daily API runtime logs
+/log_history/

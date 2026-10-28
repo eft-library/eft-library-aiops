@@ -35,6 +35,7 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
     serve = commands.add_parser("serve", help="Run the Airflow HTTP API on port 9023")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=9023)
+    serve.add_argument("--log-dir", type=Path, help="Daily API logs in Asia/Seoul")
     commands.add_parser("setup", help="Initialize DB and register existing local data")
     commands.add_parser("status", help="Show collection, database and recent jobs")
     commands.add_parser("doctor", help="Check local Python, Codex and login status")
@@ -144,14 +145,16 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
             import uvicorn
 
             from aiops.api import create_app
+            from aiops.api_logging import api_log_output
 
-            app = create_app(
-                settings, token=os.getenv("AIOPS_API_TOKEN", ""),
-                sources_config=Path(os.getenv(
-                    "AIOPS_SOURCES_CONFIG", "config/log_sources.yaml"
-                )),
-            )
-            uvicorn.run(app, host=args.host, port=args.port, workers=1)
+            with api_log_output(args.log_dir):
+                app = create_app(
+                    settings, token=os.getenv("AIOPS_API_TOKEN", ""),
+                    sources_config=Path(os.getenv(
+                        "AIOPS_SOURCES_CONFIG", "config/log_sources.yaml"
+                    )),
+                )
+                uvicorn.run(app, host=args.host, port=args.port, workers=1)
             return 0
         elif args.command == "setup":
             from aiops.operations import setup

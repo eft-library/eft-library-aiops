@@ -35,11 +35,11 @@ AIOPS_API_TOKEN=직접_생성한_비밀키
 ```
 
 ```sh
-# 최초 설치만: 테이블 초기화와 기존 데이터 등록
-uv run aiops --env-file .env setup
+# 최초 준비: 테이블 초기화, 기존 보고서·배치 등록, DB 연결 확인
+./init.sh
 
-# API 시작. 기본 포트 9023. 이 프로세스는 계속 실행되어야 합니다.
-uv run aiops --env-file .env serve --host 0.0.0.0
+# API 백그라운드 시작/재시작. 의존성 반영과 상태 확인까지 수행합니다.
+./restart.sh
 ```
 
 이후에는 Airflow가 수집·보고서 접수·Worker 실행을 HTTP로 호출합니다. **[API 호출 안내](docs/AIRFLOW_API.md)**를 참고하세요. 별도 상시 Worker 서비스는 필요하지 않습니다. Airflow DAG와 스케줄은 별도 프로젝트에서 관리합니다.
@@ -211,3 +211,5 @@ AIOPS_RUN_INTEGRATION=1 uv run pytest -q -m integration
 기본 테스트는 실제 Codex·PostgreSQL·네트워크·Docker daemon 없이 실행합니다. 실제 PostgreSQL 검증은 [별도 opt-in](docs/POSTGRES_WORKER.md)입니다. 정기 보고서는 기간 경계·윤년·지연 도착·버전 재사용·누락 전파·월간 입력 제한도 검증합니다. Phase 2는 증분·회전·덮어쓰기·미완성 줄·중단 복구·마스킹·HTTP 집계와 시스템/Docker 대역도 검증합니다. 가짜 Provider, CLI 오류 코드, 입력 제한, 결과 검증, 비밀정보 미기록, 프로세스 간 잠금, 타임아웃 시 자식 프로세스 종료를 검증합니다.
 
 [보안 및 배포 안내](docs/SECURITY.md), [입력 계약 초안](docs/BATCH_CONTRACT.md), [Phase 1](docs/PHASE1.md), [Phase 2](docs/PHASE2.md), [Phase 3](docs/PHASE3.md)를 참고하세요.
+
+API 재시작은 `./restart.sh`, 상태 확인은 `./restart.sh status`, 종료는 `./restart.sh stop`입니다. 로그는 `tail -f "log_history/api-$(TZ=Asia/Seoul date +%F).log"`으로 확인합니다. 로그 파일은 한국 시간 기준 날짜별로 나뉘고 실행 중 자정이 지나도 자동 전환됩니다. `log_history/`는 Git에서 제외합니다. 재부팅 후 자동 시작 기능은 포함하지 않습니다.

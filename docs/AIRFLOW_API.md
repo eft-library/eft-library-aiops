@@ -20,15 +20,17 @@ AIOPS_SOURCES_CONFIG=config/log_sources.yaml
 AIOPS_API_TOKEN=직접_생성한_비밀키
 ```
 
-비밀키는 `uv run python -c 'import secrets; print(secrets.token_urlsafe(32))'`로 생성할 수 있다. 채팅이나 Git에 넣지 않는다. DB를 이미 초기화했다면 다시 만들 필요 없다. 새 설치만 `uv run aiops --env-file .env setup`을 한 번 실행한다.
+비밀키는 `uv run python -c 'import secrets; print(secrets.token_urlsafe(32))'`로 생성할 수 있다. 채팅이나 Git에 넣지 않는다. DB를 이미 초기화했다면 다시 만들 필요 없다. 초기 준비는 `./init.sh`로 실행한다. 의존성 반영 → DB 테이블 초기화 → 기존 보고서 이전 → 배치 등록 → DB 연결 확인을 처리하며, 반복 실행할 수 있다. DB나 원본 데이터 파일을 삭제하지 않는다. API 실행과 수집·Codex 분석은 하지 않는다.
 
 API 시작:
 
 ```sh
-uv run aiops --env-file .env serve --host 0.0.0.0
+./restart.sh
 ```
 
-기본 포트는 9023이고 API 프로세스는 하나다. 이 명령은 포그라운드에서 실행되며 터미널을 닫으면 종료될 수 있다. 현재 호스트에서 사용하는 프로세스 관리 방식으로 API를 계속 실행한다. 자동 서비스 설치는 하지 않는다. CLI 명령은 그대로 진단용으로 사용할 수 있다.
+기본 포트는 9023이다. `./restart.sh`는 의존성 반영 후 기존 API를 종료하고 백그라운드로 시작하며, 인증된 상태 API에서 DB 연결까지 확인한다. 로그는 한국 시간 기준 log_history/api-YYYY-MM-DD.log에 날짜별로 저장된다. 실행 중 자정이 지나면 다음 로그부터 새 날짜 파일에 기록하며 같은 날 재시작은 이어서 기록한다. log_history/는 Git에서 제외한다. `./restart.sh status`는 실행 상태 확인, `./restart.sh stop`은 종료다. PID와 잠금은 AIOPS_DATA_DIR/run에 저장한다. .env의 AIOPS_API_HOST/AIOPS_API_PORT로 주소와 포트를 변경할 수 있다(기본 0.0.0.0:9023).
+
+수동 실행한 API나 다른 프로세스는 임의로 종료하지 않는다. 기존 요청이 30초 안에 끝나지 않으면 강제 종료 없이 재시작을 중단한다. 시스템 재부팅 후 자동 시작이나 장애 시 자동 재시작 기능은 포함하지 않는다.
 
 ## 외부 호출 프로젝트와의 경계
 
