@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from aiops.collectors.store import fsync_dir
+from aiops.data_permissions import data_directory, data_file
 
 
 def encoded(value):
@@ -23,9 +24,9 @@ def encoded(value):
 class ReportStore:
     def __init__(self, root: Path):
         self.root = root
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        data_directory(root)
         path = root / "reports.sqlite3"
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+        fd = data_file(path, os.O_WRONLY | os.O_CREAT)
         os.close(fd)
         self.db = sqlite3.connect(path, timeout=5)
         self.db.row_factory = sqlite3.Row
@@ -116,7 +117,7 @@ class ReportStore:
         directory = (
             self.root / row["kind"] / row["period_start"] / f"v{row['revision']:04d}"
         )
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        data_directory(directory)
         objects = {
             "input.json": row["input_json"],
             "manifest.json": row["manifest_json"],
@@ -148,6 +149,7 @@ class ReportStore:
                 with os.fdopen(fd, "w") as stream:
                     stream.write(content)
                     stream.flush()
+                    os.fchmod(stream.fileno(), 0o644)
                     os.fsync(stream.fileno())
                 os.replace(temporary, directory / name)
             finally:

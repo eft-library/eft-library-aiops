@@ -4,6 +4,7 @@ import os
 import re
 import stat
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -37,42 +38,178 @@ class FileCollector:
         self.source, self.config = source, config
         self.warnings = []
 
+    directory_mode = False
+
+    def _accept(self, path, info, known):
+        tracked = (info.st_dev, info.st_ino) in known
+        if self.directory_mode:
+            base = ROTATED.sub("", path.name)
+            rotated = base != path.name
+            return tracked or (
+                (
+                    fnmatch.fnmatch(path.name, self.source.pattern)
+                    or (
+                        self.source.include_rotated
+                        and rotated
+                        and fnmatch.fnmatch(base, self.source.pattern)
+                    )
+                )
+                and (self.source.include_rotated or not rotated)
+            )
+        active = self.source.path
+        return path == active or (
+            path.parent == active.parent
+            and path.name.startswith(active.name + ".")
+            and (tracked or (self.source.include_rotated and ROTATED.search(path.name)))
+        )
+
     def candidates(self, known, deadline):
-        path = self.source.path
-        # Only exact active file + already tracked renamed inode siblings by default.
-        if not stat.S_ISDIR(path.parent.stat().st_mode):
+        root = self.source.path if self.directory_mode else self.source.path.parent
+        root_info = root.lstat()
+        if stat.S_ISLNK(root_info.st_mode):
+            raise ScanError("symlink_excluded")
+        if not stat.S_ISDIR(root_info.st_mode):
             raise ScanError("not_directory")
-        candidates = []
-        seen = 0
-        with os.scandir(path.parent) as entries:
-            for entry in entries:
-                seen += 1
-                if seen > self.config.max_scan_entries or time.monotonic() >= deadline:
-                    self.warnings.append("scan_limit")
-                    break
-                if entry.name != path.name and not entry.name.startswith(
-                    path.name + "."
+        state = getattr(self, "scan_state", None) or {}
+        if state.get("root") != str(root):
+            state = {}
+        pending = deque(state.get("queue") or [{"directory": ".", "after": None}])
+        candidates = {}
+        known_cursor = state.get("known_cursor", 0)
+
+        def add(path, info):
+            if (
+                stat.S_ISREG(info.st_mode)
+                and not path.name.lower().endswith(COMPRESSED)
+                and self._accept(path, info, known)
+            ):
+                candidates[str(path)] = (path, info)
+
+        # The exact active file is O(1), independent of its directory discovery cursor.
+        if not self.directory_mode:
+            try:
+                active_info = self.source.path.lstat()
+                if stat.S_ISLNK(active_info.st_mode):
+                    self.warnings.append("symlink_excluded")
+                else:
+                    add(self.source.path, active_info)
+            except FileNotFoundError:
+                self.warnings.append("active_file_missing")
+
+        # Revisit a bounded, rotating window of tracked paths while discovery continues.
+        keys = sorted(known)
+        revisit = min(
+            len(keys), self.config.max_files, self.config.max_scan_entries // 2
+        )
+        visited = 0
+        revisit_deadline = min(
+            deadline, time.monotonic() + max(0, deadline - time.monotonic()) * 0.25
+        )
+        for index in range(revisit):
+            if time.monotonic() >= revisit_deadline:
+                break
+            previous = known[keys[(known_cursor + index) % len(keys)]]
+            path = Path(previous["path"])
+            try:
+                relative = path.relative_to(root)
+                if ".." in relative.parts or (
+                    not self.source.recursive
+                    and self.directory_mode
+                    and path.parent != root
                 ):
                     continue
-                if entry.is_symlink():
-                    if entry.name == path.name:
-                        self.warnings.append("symlink_excluded")
+                parent = path.parent
+                safe = True
+                while parent != root:
+                    if parent.is_symlink():
+                        safe = False
+                        break
+                    parent = parent.parent
+                if safe:
+                    add(path, path.lstat())
+            except (ValueError, FileNotFoundError):
+                pass
+            finally:
+                visited += 1
+        known_cursor = (known_cursor + visited) % max(1, len(keys))
+        scanned = visited
+        paused = False
+        while pending and not paused:
+            cursor = pending.popleft()
+            relative = Path(cursor["directory"])
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ScanError("invalid_scan_cursor")
+            directory = root / relative
+            try:
+                if directory.is_symlink():
                     continue
-                info = entry.stat(follow_symlinks=False)
-                if not stat.S_ISREG(info.st_mode) or entry.name.lower().endswith(
-                    COMPRESSED
-                ):
-                    continue
-                tracked = (info.st_dev, info.st_ino) in known
-                if (
-                    entry.name == path.name
-                    or tracked
-                    or (self.source.include_rotated and ROTATED.search(entry.name))
-                ):
-                    candidates.append((Path(entry.path), info))
-        if not any(candidate == path for candidate, _ in candidates):
-            self.warnings.append("active_file_missing")
-        return self.ordered(candidates, known)
+                with os.scandir(directory) as entries:
+                    skipping = cursor.get("after") is not None
+                    descended = False
+                    for entry in entries:
+                        if (
+                            time.monotonic() >= deadline
+                            or scanned >= self.config.max_scan_entries
+                        ):
+                            self.warnings.append(
+                                "scan_timeout"
+                                if time.monotonic() >= deadline
+                                else "scan_entry_limit"
+                            )
+                            pending.appendleft(cursor)
+                            paused = True
+                            break
+                        if skipping:
+                            if entry.name == cursor["after"]:
+                                skipping = False
+                            continue
+                        # Only update the anchor after an entry is handled.
+                        if (
+                            entry.is_dir(follow_symlinks=False)
+                            and self.directory_mode
+                            and self.source.recursive
+                        ):
+                            child = relative / entry.name
+                            if len(child.parts) > 64:
+                                self.warnings.append("scan_depth_limit")
+                            else:
+                                cursor["after"] = entry.name
+                                scanned += 1
+                                pending.appendleft(cursor)
+                                pending.appendleft(
+                                    {"directory": str(child), "after": None}
+                                )
+                                descended = True
+                                break
+                        elif not entry.is_symlink() and not entry.name.lower().endswith(
+                            COMPRESSED
+                        ):
+                            try:
+                                add(Path(entry.path), entry.stat(follow_symlinks=False))
+                            except FileNotFoundError:
+                                self.warnings.append("file_disappeared_during_scan")
+                        cursor["after"] = entry.name
+                        scanned += 1
+                    if not paused and not descended and skipping:
+                        # Anchor was removed between runs; restart this directory safely.
+                        cursor["after"] = None
+                        pending.appendleft(cursor)
+                        self.warnings.append("scan_cursor_reset")
+                        paused = True
+            except FileNotFoundError:
+                self.warnings.append("directory_disappeared_during_scan")
+            except PermissionError:
+                self.warnings.append("permission_denied")
+        self.next_scan_state = {
+            "root": str(root),
+            "queue": list(pending),
+            "known_cursor": known_cursor,
+        }
+        if not candidates and not pending:
+            self.warnings.append(
+                "no_matching_files" if self.directory_mode else "active_file_missing"
+            )
+        return self.ordered(list(candidates.values()), known)
 
     @staticmethod
     def ordered(candidates, known):
@@ -80,19 +217,19 @@ class FileCollector:
             path, info = pair
             previous = known.get((info.st_dev, info.st_ino))
             if previous is None:
-                return (1, "", info.st_mtime_ns, str(path))
+                return (0, "", info.st_mtime_ns, str(path))
             changed = (
                 previous["offset"] < info.st_size
                 or previous["mtime_ns"] != info.st_mtime_ns
             )
             return (
-                0 if changed else 2,
+                1 if changed else 2,
                 previous["last_success"],
                 info.st_mtime_ns,
                 str(path),
             )
 
-        # Drain known backlog, discover new files, then revisit unchanged files.
+        # Give unseen files a first read; rotate backlog by last success, then revisit unchanged files.
         return sorted(candidates, key=priority)
 
     def read(
@@ -156,7 +293,7 @@ class FileCollector:
                 if time.monotonic() >= deadline:
                     result.warnings.append("timeout")
                     break
-                chunk = stream.read(min(65536, budget, end - position))
+                chunk = stream.readline(min(65536, budget, end - position))
                 if not chunk:
                     break
                 result.bytes_read += len(chunk)
@@ -193,7 +330,8 @@ class FileCollector:
                             position = chunk_start + consumed
                             break
                 if len(result.lines) >= max_lines:
-                    result.warnings.append("record_limit")
+                    if position < end:
+                        result.warnings.append("record_limit")
                     break
             offset = position - len(buffer)
             if buffer:
@@ -224,50 +362,4 @@ class FileCollector:
 
 
 class DirectoryCollector(FileCollector):
-    def candidates(self, known, deadline):
-        root = self.source.path
-        root_info = root.lstat()
-        if stat.S_ISLNK(root_info.st_mode):
-            raise ScanError("symlink_excluded")
-        if not stat.S_ISDIR(root_info.st_mode):
-            raise ScanError("not_directory")
-        pending, candidates, scanned = [root], [], 0
-        while pending:
-            directory = pending.pop()
-            with os.scandir(directory) as entries:
-                for entry in entries:
-                    scanned += 1
-                    if (
-                        scanned > self.config.max_scan_entries
-                        or time.monotonic() >= deadline
-                    ):
-                        self.warnings.append("scan_limit")
-                        return self.ordered(candidates, known)
-                    if entry.is_symlink():
-                        continue
-                    if entry.is_dir(follow_symlinks=False):
-                        if self.source.recursive:
-                            pending.append(Path(entry.path))
-                        continue
-                    info = entry.stat(follow_symlinks=False)
-                    if not stat.S_ISREG(info.st_mode) or entry.name.lower().endswith(
-                        COMPRESSED
-                    ):
-                        continue
-                    tracked = (info.st_dev, info.st_ino) in known
-                    base = ROTATED.sub("", entry.name)
-                    rotated = base != entry.name
-                    matches = fnmatch.fnmatch(entry.name, self.source.pattern)
-                    matches_rotated = (
-                        self.source.include_rotated
-                        and rotated
-                        and fnmatch.fnmatch(base, self.source.pattern)
-                    )
-                    if tracked or (
-                        (matches or matches_rotated)
-                        and (self.source.include_rotated or not rotated)
-                    ):
-                        candidates.append((Path(entry.path), info))
-        if not candidates:
-            self.warnings.append("no_matching_files")
-        return self.ordered(candidates, known)
+    directory_mode = True

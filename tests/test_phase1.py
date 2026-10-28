@@ -97,7 +97,7 @@ def test_provider_result_and_metadata(settings, monkeypatch):
     text = metadata[0].read_text()
     assert 'input-only' not in text and 'sample only' not in text
     assert json.loads(text)['status'] == 'COMPLETED'
-    assert metadata[0].stat().st_mode & 0o777 == 0o600
+    assert metadata[0].stat().st_mode & 0o777 == 0o644
     assert not list(settings.data_dir.glob('snapshot-*'))
 
 

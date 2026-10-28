@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from aiops.collectors.models import Batch, Event, Metric
+from aiops.data_permissions import data_directory, data_file
 from aiops.providers.base import ErrorKind, ProviderError
 from aiops.reporting.periods import day_for
 
@@ -23,8 +24,10 @@ def fsync_dir(path: Path):
 
 @contextmanager
 def collector_lock(root: Path):
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with (root / "collect.lock").open("a") as lock:
+    data_directory(root)
+    with os.fdopen(
+        data_file(root / "collect.lock", os.O_WRONLY | os.O_CREAT | os.O_APPEND), "a"
+    ) as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -41,14 +44,17 @@ class BatchStore:
         self.staging = self.root / ".staging"
         self.batches = self.root / "batches"
         for path in (self.root, self.staging, self.batches):
-            path.mkdir(parents=True, exist_ok=True, mode=0o700)
+            data_directory(path)
         self.db_path = self.root / "checkpoints.sqlite3"
-        descriptor = os.open(self.db_path, os.O_WRONLY | os.O_CREAT, 0o600)
+        descriptor = data_file(self.db_path, os.O_WRONLY | os.O_CREAT)
         os.close(descriptor)
         self.db = sqlite3.connect(self.db_path, timeout=5)
         self.db.execute("PRAGMA journal_mode=DELETE")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript("""
+            CREATE TABLE IF NOT EXISTS collection_state (
+                name TEXT PRIMARY KEY, value TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS checkpoints (
                 source TEXT NOT NULL, device INTEGER NOT NULL, inode INTEGER NOT NULL,
                 state TEXT NOT NULL, PRIMARY KEY(source, device, inode)
@@ -101,11 +107,20 @@ class BatchStore:
             )
         }
 
-    def commit(self, batch, events, checkpoints, *, before_commit=None, metrics=None):
+    def commit(
+        self,
+        batch,
+        events,
+        checkpoints,
+        *,
+        before_commit=None,
+        metrics=None,
+        states=None,
+    ):
         """Persist all masked data before atomically committing catalogue + checkpoints."""
         metrics = batch.metrics if metrics is None else metrics
         stage = self.staging / batch.batch_id
-        stage.mkdir(mode=0o700)
+        data_directory(stage)
         for name, data in (
             ("snapshot.json", batch.model_dump_json()),
             (
@@ -117,7 +132,7 @@ class BatchStore:
                 "".join(event.model_dump_json() + "\n" for event in events),
             ),
         ):
-            fd = os.open(stage / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            fd = data_file(stage / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 stream.write(data)
                 stream.flush()
@@ -136,6 +151,11 @@ class BatchStore:
                 self.db.execute(
                     "INSERT OR REPLACE INTO checkpoints VALUES (?, ?, ?, ?)",
                     (source, state["device"], state["inode"], json.dumps(state)),
+                )
+            for name, value in states or []:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO collection_state VALUES (?, ?)",
+                    (name, json.dumps(value)),
                 )
         self.publish(batch.batch_id)
         return self.batches / batch.batch_id / "snapshot.json"
@@ -227,3 +247,9 @@ class BatchStore:
             ON d.batch_id=i.batch_id WHERE d.day=? ORDER BY d.batch_id""",
             (day,),
         ).fetchall()
+
+    def state(self, name, default=None):
+        row = self.db.execute(
+            "SELECT value FROM collection_state WHERE name=?", (name,)
+        ).fetchone()
+        return json.loads(row[0]) if row else default

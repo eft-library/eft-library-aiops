@@ -17,12 +17,12 @@
 | `events` | 서비스별 오류와 전후 문맥을 선별한 대표 이벤트. 크기 제한으로 일부 생략 가능 |
 | `metrics` | 시스템·선택적 Docker 관측값. ID·측정 시각·지표명·값·단위·대상 포함 |
 | `collection_failures` | 소스별 오류·누락·한도 도달·보류. 오류 원문 대신 안전한 reason 코드와 마스킹된 경로 |
-| `totals` | 선별 전 이벤트 수·대표 이벤트 수·payload 읽기량·파싱 실패 수 |
+| `totals` | 선별 전 이벤트 수·대표 이벤트 수·payload 읽기량·파싱 실패 수 및 timestamp_absent/timestamp_unrecognized/level_unrecognized 건수 |
 | `limitations` | 마스킹·시간 필터·범위·스냅샷 생략에 대한 제한 |
 
 이벤트는 `event_id`, 타임존을 포함한 `timestamp` 또는 null, `service`, `source`(`file/directory`), `level`, `message`, 마스킹된 `file`, `metadata`를 가진다. 시각 파싱 실패를 현재 시각으로 꾸미지 않는다. 타임존 없는 ISO 시각에는 소스 YAML의 `timezone`을 적용한다. 지원하지 않는 형식은 null과 `parse_failed`로 보존한다.
 
-이벤트 metadata는 `parse_failed`, `encoding_error`, 선택적 `message_truncated`, `http_status`, `response_time_ms`를 포함한다. NPM의 알려진 proxy-host 2/3/4 파일에는 domain도 연결한다. 일반 duration에 단위가 없으면 응답 시간을 추정하지 않는다. Nginx의 `request_time`은 초로 해석한다.
+이벤트 metadata는 `parse_failed`, `encoding_error`, `timestamp_status`(parsed/absent/unrecognized), `level_unrecognized`, 선택적 `message_truncated`, `http_status`, `response_time_ms`를 포함한다. NPM의 알려진 proxy-host 2/3/4 파일에는 domain도 연결한다. 일반 duration에 단위가 없으면 응답 시간을 추정하지 않는다. Nginx의 `request_time`은 초로 해석한다.
 
 ID 형식은 `<batch_id>:evt-<n>`, `<batch_id>:metric-<n>`이고 배치 내 유일하다. `error_groups.evidence_ids`는 같은 디렉터리 `events.jsonl`의 이벤트에 연결된다. 모든 이벤트가 대표 `events`에도 포함되지는 않는다. 분석자가 본 입력 범위와 전체 배치 근거를 구분하고, Phase 3에서 근거 참조가 실재하는지 검증해야 한다.
 

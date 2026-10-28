@@ -1,5 +1,6 @@
 """Shared collection service, callable from CLI and future API/worker layers."""
 
+import hashlib
 import re
 import time
 from collections import Counter, defaultdict
@@ -21,6 +22,7 @@ from aiops.collectors.parse import normalize
 from aiops.collectors.redact import mask
 from aiops.collectors.store import BatchStore, collector_lock
 from aiops.collectors.system import SystemCollector
+from aiops.data_permissions import data_directory
 from aiops.reporting.periods import day_for
 
 IMPORTANT = {"WARNING", "ERROR", "FATAL", "CRITICAL"}
@@ -161,6 +163,13 @@ def summarize(
             "representative_events": len(representatives),
             "bytes_read": sum(item.bytes_read for item in coverage.values()),
             "parse_failed": sum(bool(e.metadata["parse_failed"]) for e in events),
+            "timestamp_absent": sum(
+                e.metadata.get("timestamp_status") == "absent" for e in events
+            ),
+            "timestamp_unrecognized": sum(
+                e.metadata.get("timestamp_status") == "unrecognized" for e in events
+            ),
+            "level_unrecognized": sum(e.level == "UNKNOWN" for e in events),
         },
         limitations=[
             "Masking is rule-based and cannot guarantee removal of all sensitive data.",
@@ -213,11 +222,14 @@ class CollectionService:
         self, config: CollectionConfig, data_dir: Path, *, system=None, docker=None
     ):
         self.config, self.data_dir = config, data_dir.resolve() / "collection"
+        data_directory(data_dir.resolve())
         self.system = system or SystemCollector()
         self.docker = docker or DockerCollector()
 
     def collect(self, services=None, *, since=None, backfill=False):
-        selected = list(services) if services else list(self.config.sources)
+        selected = (
+            list(dict.fromkeys(services)) if services else list(self.config.sources)
+        )
         if set(selected) - self.config.sources.keys():
             raise ValueError("unknown service")
         for source in self.config.sources.values():
@@ -247,6 +259,21 @@ class CollectionService:
         physical_lines, files = 0, 0
         excluded_by_day = Counter()
         enabled = [name for name in selected if config.sources[name].enabled]
+        order_key = (
+            "order:" + hashlib.sha256(",".join(enabled).encode()).hexdigest()[:16]
+        )
+        offset = store.state(order_key, 0) % max(1, len(enabled))
+        enabled = enabled[offset:] + enabled[:offset]
+        selected = enabled + [
+            name for name in selected if not config.sources[name].enabled
+        ]
+        states = [(order_key, (offset + 1) % max(1, len(enabled)))]
+        metrics_reserve = min(
+            config.timeout_seconds * 0.1,
+            (0.2 if config.system.enabled else 0)
+            + (config.docker.timeout_seconds if config.docker.enabled else 0),
+        )
+        file_deadline = deadline - metrics_reserve
         for name in selected:
             source = config.sources[name]
             if not source.enabled:
@@ -261,9 +288,22 @@ class CollectionService:
             share = min(
                 int(source.max_read_mb * 1024 * 1024), remaining // max(1, len(enabled))
             )
+            count = max(1, len(enabled))
+            source_lines = (config.max_records - physical_lines + count - 1) // count
+            source_files = (config.max_files - files + count - 1) // count
+            source_deadline = min(
+                file_deadline,
+                time.monotonic() + max(0, file_deadline - time.monotonic()) / count,
+            )
             enabled.remove(name)
+            collector.scan_state = store.state("scan:" + name)
             try:
-                candidates = collector.candidates(known, deadline)
+                scan_deadline = min(
+                    source_deadline,
+                    time.monotonic() + max(0, source_deadline - time.monotonic()) * 0.4,
+                )
+                candidates = collector.candidates(known, scan_deadline)
+                states.append(("scan:" + name, collector.next_scan_state))
             except (OSError, ScanError) as exc:
                 reason = self.reason(exc)
                 failures.append(
@@ -273,7 +313,10 @@ class CollectionService:
                 continue
             warnings = list(collector.warnings)
             seen = set()
+            remaining_candidates = len(candidates)
             for path, expected in candidates:
+                file_slots = max(1, min(source_files, remaining_candidates))
+                remaining_candidates -= 1
                 key = expected.st_dev, expected.st_ino
                 if key in seen:
                     continue
@@ -286,27 +329,48 @@ class CollectionService:
                 ):
                     warnings.append("run_limit")
                     break
-                if time.monotonic() >= deadline:
-                    warnings.append("timeout")
+                if source_lines <= 0 or source_files <= 0:
+                    warnings.append(
+                        "source_record_limit"
+                        if source_lines <= 0
+                        else "source_file_limit"
+                    )
+                    break
+                if time.monotonic() >= source_deadline:
+                    warnings.append("source_timeout")
                     break
                 allowance = min(share, remaining)
+                file_line_limit = min(
+                    (source_lines + file_slots - 1) // file_slots,
+                    source_lines,
+                    config.max_records - physical_lines,
+                )
+                limit_scope = (
+                    "file_record_limit"
+                    if file_line_limit < source_lines
+                    else "source_record_limit"
+                )
                 try:
                     result = collector.read(
                         path,
                         expected,
                         known.get(key),
                         allowance,
-                        deadline,
+                        source_deadline,
                         backfill=backfill,
-                        max_lines=config.max_records - physical_lines,
+                        max_lines=file_line_limit,
                     )
                     remaining -= result.bytes_read
                     share -= result.bytes_read
                     info.bytes_read += result.bytes_read
                     physical_lines += len(result.lines)
+                    source_lines -= len(result.lines)
+                    source_files -= 1
                     files += 1
                     info.files += 1
                     warnings.extend(result.warnings)
+                    if "record_limit" in result.warnings:
+                        warnings.append(limit_scope)
                     result.checkpoint["last_success"] = datetime.now(
                         timezone.utc
                     ).isoformat()
@@ -331,6 +395,8 @@ class CollectionService:
                     remaining -= allowance
                     share -= allowance
                     files += 1
+                    source_files -= 1
+                    source_lines = 0
                     failures.append(
                         Failure(
                             service=name, file=mask(str(path)), reason=self.reason(exc)
@@ -346,7 +412,11 @@ class CollectionService:
             if actionable:
                 info.status = "partial"
             if not candidates:
-                info.status = "failed"
+                info.status = (
+                    "partial"
+                    if getattr(collector, "next_scan_state", {}).get("queue")
+                    else "failed"
+                )
             if info.status in {"partial", "failed"}:
                 for warning in sorted(actionable):
                     failures.append(Failure(service=name, reason=warning))
@@ -402,7 +472,9 @@ class CollectionService:
                 excluded_by_day=dict(excluded_by_day),
             ),
         )
-        snapshot = store.commit(batch, events, checkpoints, metrics=metrics)
+        snapshot = store.commit(
+            batch, events, checkpoints, metrics=metrics, states=states
+        )
         return {
             "batch_id": batch_id,
             "snapshot": str(snapshot),

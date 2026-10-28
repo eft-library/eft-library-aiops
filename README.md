@@ -84,6 +84,17 @@ mv .aiops aiops_data
 
 `.env`에 기존 경로를 설정했다면 `AIOPS_DATA_DIR=aiops_data`로 변경합니다. 폴더 전체를 옮겨야 SQLite 체크포인트와 기존 배치를 유지하며 이어 수집할 수 있습니다. 두 폴더가 이미 모두 있다면 덮어쓰거나 임의로 합치지 않습니다. 기존 `.aiops/`와 새 `aiops_data/`는 모두 Git 제외 대상입니다.
 
+### 데이터 접근 권한
+
+`aiops_data/`에 생성하는 폴더는 **755**, 일반 데이터 파일은 **644**로 설정합니다. 같은 서버의 다른 계정에서도 읽을 수 있으며 데이터 파일에는 실행 권한을 주지 않습니다. 기존 서버 파일은 AIOps 작업을 멈춘 상태에서 한 번 적용합니다.
+
+```sh
+find aiops_data -type d -exec chmod 755 {} +
+find aiops_data -type f -exec chmod 644 {} +
+```
+
+Codex 인증 저장소나 `.env`의 권한은 변경하지 않습니다.
+
 ## 로그 수집 (Phase 2)
 
 **`collect`는 Codex를 실행하지 않습니다.** 로그 읽기·정규화·마스킹·오류 집계·시스템 지표 수집 후 재사용 가능한 배치를 저장합니다. PostgreSQL 접속 설정도 필요하지 않습니다.
@@ -106,7 +117,9 @@ uv run aiops --env-file .env collect --config config/log_sources.yaml --all
 
 첫 실행은 파일별 최근 일부만 읽고, 다음 실행은 새로 추가된 부분만 읽습니다. 새 로그가 없으면 `events: 0`도 정상입니다. 출력의 `snapshot`은 요약 JSON, `events_file`은 마스킹한 정규화 이벤트 파일입니다. 기본 저장 경로는 `aiops_data/collection/`이고 체크포인트는 별도 SQLite에 저장합니다.
 
-`status: partial`과 종료 코드 **10**은 일부 소스 실패·한도 도달·미완성 줄 보류가 있으나 배치는 저장했다는 의미입니다. `coverage`와 저장된 스냅샷의 `collection_failures`를 확인하세요.
+수집 한도는 서비스·파일 사이에 배분하며 시작 서비스와 디렉터리 탐색 위치를 저장해 다음 실행에 이어갑니다.
+
+`status: partial`과 종료 코드 **10**은 일부 소스 실패·한도 도달·미완성 줄 보류가 있으나 배치는 저장했다는 의미입니다. `coverage`와 저장된 스냅샷의 `collection_failures`를 확인하세요. 새 경고 `scan_entry_limit`과 `scan_timeout`은 탐색 개수/시간을 구분합니다. `timestamp_absent`는 원문에 시각이 없는 로그이며, 이를 수집 시각으로 대체하지 않습니다.
 
 수집만 할 때는 여기까지 실행합니다. 아래 `analyze`는 단일 배치 점검용입니다. 정기 보고서는 다음 절의 `report` 명령으로 날짜별로 묶어 분석합니다.
 

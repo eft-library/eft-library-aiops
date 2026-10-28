@@ -4,6 +4,7 @@ from pathlib import Path
 
 from aiops.collectors.config import load_config
 from aiops.collectors.store import BatchStore, collector_lock
+from aiops.data_permissions import data_directory
 from aiops.providers.base import AnalysisRequest, ErrorKind, ProviderError
 from aiops.reporting.daily import daily_input
 from aiops.reporting.periods import for_period
@@ -120,6 +121,7 @@ class ReportingService:
         self.sources_config, self.interval = sources_config, interval_minutes
         self.now = now
         self.root = settings.data_dir.resolve()
+        data_directory(self.root)
         self.reports = None
 
     def execute(self, kind, date=None, *, analyze=False):
