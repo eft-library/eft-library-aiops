@@ -1,0 +1,59 @@
+# 조회 전용 운영 웹
+
+4003 포트의 웹은 운영 결과를 조회한다. 수집·분석 접수·재시도·취소·설정 변경 기능은 제공하지 않는다. 실행 스케줄과 DAG는 별도 Airflow 프로젝트에서 관리한다.
+
+```text
+브라우저 :4003 → 웹 서버의 GET 조회 프록시 → AIOps API :9023 → PostgreSQL
+```
+
+브라우저에 API 키를 전달하지 않는다. 웹 서버만 기존 AIOPS_API_TOKEN을 읽고 API에 전달한다. 웹의 `/read/`는 status, reports, reports/{id}, collections, jobs GET 요청만 허용한다. 외부 경로·임의 URL·POST 요청은 전달하지 않는다. 다른 호스트로의 API redirect도 따르지 않는다. 별도 브라우저 로그인은 현재 제공하지 않으며, 웹에 접속할 수 있는 사용자는 보고서를 조회할 수 있다.
+
+## 시작 및 종료
+
+프로젝트 루트에서 기존 .env를 유지하고 실행한다.
+
+```sh
+./restart.sh
+```
+
+브라우저 주소는 `http://호스트주소:4003`이다. API·웹 각각 독립적인 프로세스로 실행한다. restart-web.sh는 의존성 반영 후 웹 프로세스만 교체하고 `/health`에서 준비 상태를 확인한다. API/DB 실제 연결 실패는 화면에서 표시한다. restart.sh는 의존성을 한 번 반영한 뒤 API → 웹 순서로 함께 재시작한다. API 준비 확인이 실패하면 웹 재시작은 진행하지 않는다. 웹 시작이 실패해도 이미 시작한 API는 유지된다. 전체 상태 확인은 `./restart.sh status`, 전체 종료는 `./restart.sh stop`이며 웹 → API 순서로 종료한다. 개별 관리는 `./scripts/restart-api.sh`와 `./scripts/restart-web.sh`를 사용한다.
+
+```sh
+./scripts/restart-web.sh status
+./scripts/restart-web.sh stop
+```
+
+웹 상태/PID는 AIOPS_DATA_DIR/run/web.pid, 로그는 log_history/web-YYYY-MM-DD.log에 저장한다. 날짜는 Asia/Seoul 기준이며 자정을 넘겨 실행해도 다음 기록부터 새 파일에 쓴다. API 로그와 별개이며 시스템 재부팅 후 자동 시작은 제공하지 않는다.
+
+선택 설정:
+
+```dotenv
+AIOPS_WEB_API_URL=http://127.0.0.1:9023
+AIOPS_WEB_HOST=0.0.0.0
+AIOPS_WEB_PORT=4003
+```
+
+기존 AIOPS_API_TOKEN을 사용한다. DB 변경이나 npm 빌드는 필요 없다. HTML/CSS/JavaScript는 Python 패키지 안에 포함되므로 `uv sync --locked`만으로 반영된다. CLI 직접 실행은 `uv run aiops --env-file .env web --host 0.0.0.0 --port 4003`이다.
+
+## 화면
+
+- 대시보드: 최근 완료된 보고서 위험도·요약, 최근 일일 보고서의 관측 이벤트와 수집 슬롯, 전체 대기 작업 수, 최근 일일 보고서 기반 7일 추이, 최근 보고서.
+- 분석 보고서: 일일·주간·월간 유형, 위험도, 분석 상태, 기간 시작일 범위, 이전 수정본 포함 여부, 페이지 조회.
+- 보고서 상세: 관측 사항, 원인 가설, 확인 권고, 근거 이벤트/하위 보고서, 분석 한계, 관측 범위, 버전과 모델 정보.
+- 수집 현황: 최신 등록 배치의 서비스별 coverage·경고, 배치 이력. 소스별 최신 배치 결과이며 서비스의 실시간 정상 여부를 뜻하지 않는다.
+- 작업 현황: 상태별 작업 목록, 시도 횟수, 접수·완료 시각, 오류. 실행·취소 버튼은 없다.
+
+모든 화면의 시각은 한국 시간이다. 분석 완료와 수집 범위 충족은 별도로 표시한다. 0건과 데이터 없음은 구분하고, 보고서가 없는 날짜를 0건으로 그래프에 집계하지 않는다. 같은 기간의 기본 목록은 최신 수정본만 보여주며 이전 수정본은 필터로 포함한다. 날짜 필터는 보고서 기간 시작일 기준이다. 데이터는 페이지 진입과 새로고침 버튼에서 조회한다.
+
+보고서는 저장된 분석 시점의 결과다. 수집 후 새 보고서를 준비하지 않았다면 이전 보고서가 최신 수집 배치까지 반영했다는 의미는 아니다. 분석 입력에서 생략된 근거는 원문이 없음을 표시한다. 로컬 샘플·가짜 분석 결과를 운영 화면에 자동 삽입하지 않는다.
+
+## 조회 API
+
+API 인증 방식은 기존 X-AIOps-Key와 같다. 목록 page는 1부터, page_size는 기본 12·최대 100이다. 응답은 items/total/page/page_size 형태다.
+
+- GET /v1/reports: type=daily|weekly|monthly, status, severity, start/end=YYYY-MM-DD, history=true, page/page_size.
+- GET /v1/reports/{id}: 기존 result 필드를 유지하면서 period/kind/revision/data_quality/totals/evidence/lineage를 추가한다.
+- GET /v1/collections: page/page_size.
+- GET /v1/jobs: status, page/page_size.
+
+새 조회는 DB read-only 세션으로 실행하며 파일 복구·분석 요청·보고서 재생성·DB 마이그레이션을 수행하지 않는다. 빈 목록·API 연결 실패·인증 실패·없는 보고서는 화면에서 구분해 표시한다.

@@ -5,7 +5,7 @@
 ### 웹 연동 시 포트
 
 - AIOps 백엔드(FastAPI): **9023**.
-- AIOps 프론트엔드(향후 추가 시): **4003**.
+- AIOps 조회 웹: **4003**.
 - API·웹을 구현할 때 위 값을 기본 포트로 사용한다. 현재 CLI·Worker 실행 자체에는 HTTP 포트가 필요하지 않다.
 
 Phase 2의 날짜별 로그·지표를 일일 분석하고, 일일 보고서로 주간·월간 분석을 수행한다. 이를 위해 Codex를 **한 번에 하나만 실행**해 장애 원인과 개선안을 제시한다. AI 분석은 권고·보고만 하며 자동 수정·재시작·배포는 하지 않는다. 작업 관리·저장·Airflow 연동을 포함한 구현은 로컬에서 완료하고, 이후 운영에 배포해 실제 환경을 검증한다.
@@ -146,3 +146,7 @@ Phase 1~3의 로컬 구현·검증 완료 후 진행한다.
 
 ## 14. PostgreSQL·Worker 구현 상태
 public.aiops_ 테이블 SQL, PostgreSQL 보고서/배치 참조 저장소, 중복 방지 작업 큐·우선순위·시도 이력·백오프·단일 Worker·소유권 기반 결과 확정·복구와 systemd 예제를 구현했다. 실제 PostgreSQL 17의 임시 DB 및 가짜 Provider로 검증했다. 호스트 FastAPI API도 구현했다. Airflow DAG는 별도 프로젝트에서 관리하며 실제 운영 API 연결은 아직 검증하지 않았다. 상세 연결은 [AIRFLOW_API.md](AIRFLOW_API.md)를 따른다. 서버 적용 순서는 [POSTGRES_WORKER.md](POSTGRES_WORKER.md), 검증은 [PHASE3_VALIDATION.md](PHASE3_VALIDATION.md)를 따른다.
+
+## 조회 전용 웹 구현
+
+4003 포트의 조회 웹과 GET 전용 서버 프록시, 보고서 목록·필터·페이지 조회, 서비스별 수집 현황·작업 상태, 보고서 상세의 근거·한계·품질 표시를 구현했다. 실행·재시도·취소·설정 변경 UI는 없다. 배포와 접근 범위는 [WEB.md](WEB.md)를 따른다.

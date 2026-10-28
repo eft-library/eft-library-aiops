@@ -14,8 +14,9 @@ SEOUL = ZoneInfo("Asia/Seoul")
 
 
 class DailyLogStream(io.TextIOBase):
-    def __init__(self, directory: Path, *, clock=None):
+    def __init__(self, directory: Path, *, clock=None, prefix="api"):
         self.directory = directory
+        self.prefix = prefix
         self.clock = clock or (lambda: datetime.now(SEOUL))
         self.lock = threading.Lock()
         data_directory(directory)
@@ -32,7 +33,7 @@ class DailyLogStream(io.TextIOBase):
             return 0
         with self.lock:
             day = self.clock().astimezone(SEOUL).date().isoformat()
-            path = self.directory / f"api-{day}.log"
+            path = self.directory / f"{self.prefix}-{day}.log"
             descriptor = data_file(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
             with os.fdopen(descriptor, "w", encoding="utf-8", errors="replace") as stream:
                 stream.write(text)
@@ -44,10 +45,10 @@ class DailyLogStream(io.TextIOBase):
 
 
 @contextmanager
-def api_log_output(directory):
+def api_log_output(directory, *, prefix="api"):
     if directory is None:
         yield
     else:
-        stream = DailyLogStream(directory)
+        stream = DailyLogStream(directory, prefix=prefix)
         with redirect_stdout(stream), redirect_stderr(stream):
             yield

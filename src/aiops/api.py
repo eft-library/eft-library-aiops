@@ -1,6 +1,5 @@
 """HTTP entry points for Airflow; files, credentials and execution stay on this host."""
 
-import json
 import secrets
 import sqlite3
 from datetime import date as CalendarDate
@@ -9,7 +8,7 @@ from typing import Literal
 from uuid import UUID
 
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, ConfigDict, Field
@@ -20,7 +19,6 @@ from aiops.operations import NoReportInput, status
 from aiops.providers.base import ErrorKind, ProviderError
 from aiops.storage.import_sqlite import sync_batches
 from aiops.storage.jobs import JobQueue, public_job, submit
-from aiops.storage.reports import PostgresReportStore
 from aiops.worker import Worker
 
 
@@ -120,20 +118,44 @@ def create_app(settings, *, token: str, sources_config: Path, provider=None):
         finally:
             queue.close()
 
+    @app.get("/v1/reports")
+    def report_list(
+        type: Literal["daily", "weekly", "monthly"] | None = None,
+        status: Literal["PREPARED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"] | None = None,
+        severity: Literal["OK", "INFO", "WARNING", "CRITICAL"] | None = None,
+        start: CalendarDate | None = None, end: CalendarDate | None = None,
+        page: int = Query(default=1, ge=1), page_size: int = Query(default=12, ge=1, le=100),
+        history: bool = False,
+    ):
+        from aiops.storage import views
+
+        if start and end and start > end:
+            raise HTTPException(status_code=422, detail="invalid_date_range")
+        return views.reports(settings, kind=type, status=status, severity=severity,
+            start=start, end=end, page=page, page_size=page_size, history=history)
+
+    @app.get("/v1/collections")
+    def collection_list(page: int = Query(default=1, ge=1), page_size: int = Query(default=12, ge=1, le=100)):
+        from aiops.storage import views
+
+        return views.collections(settings, page=page, page_size=page_size)
+
+    @app.get("/v1/jobs")
+    def job_list(
+        status: Literal["PENDING", "RUNNING", "COMPLETED", "FAILED", "TIMEOUT", "CANCELLED"] | None = None,
+        page: int = Query(default=1, ge=1), page_size: int = Query(default=12, ge=1, le=100),
+    ):
+        from aiops.storage import views
+
+        return views.jobs(settings, status=status, page=page, page_size=page_size)
+
     @app.get("/v1/reports/{report_id}")
     def report_result(report_id: str):
-        store = PostgresReportStore(settings.data_dir / "reports", settings)
-        try:
-            row = store.row(report_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="unknown_report")
-            return {
-                "report_id": row["report_id"], "status": row["status"],
-                "coverage_complete": bool(row["coverage_complete"]),
-                "error": row["error"],
-                "result": json.loads(row["result_json"]) if row["result_json"] else None,
-            }
-        finally:
-            store.close()
+        from aiops.storage import views
+
+        result = views.report_detail(settings, report_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="unknown_report")
+        return result
 
     return app

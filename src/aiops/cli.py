@@ -36,6 +36,10 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=9023)
     serve.add_argument("--log-dir", type=Path, help="Daily API logs in Asia/Seoul")
+    web = commands.add_parser("web", help="Run the read-only reporting website on port 4003")
+    web.add_argument("--host", default="127.0.0.1")
+    web.add_argument("--port", type=int, default=4003)
+    web.add_argument("--log-dir", type=Path, help="Daily web logs in Asia/Seoul")
     commands.add_parser("setup", help="Initialize DB and register existing local data")
     commands.add_parser("status", help="Show collection, database and recent jobs")
     commands.add_parser("doctor", help="Check local Python, Codex and login status")
@@ -153,6 +157,19 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
                     sources_config=Path(os.getenv(
                         "AIOPS_SOURCES_CONFIG", "config/log_sources.yaml"
                     )),
+                )
+                uvicorn.run(app, host=args.host, port=args.port, workers=1)
+            return 0
+        elif args.command == "web":
+            import uvicorn
+
+            from aiops.api_logging import api_log_output
+            from aiops.web_server import create_web_app
+
+            with api_log_output(args.log_dir, prefix="web"):
+                app = create_web_app(
+                    api_url=os.getenv("AIOPS_WEB_API_URL", "http://127.0.0.1:9023"),
+                    token=os.getenv("AIOPS_API_TOKEN", ""),
                 )
                 uvicorn.run(app, host=args.host, port=args.port, workers=1)
             return 0

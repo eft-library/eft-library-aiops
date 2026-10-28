@@ -830,3 +830,45 @@ def test_http_api_enqueues_executes_and_exposes_result_without_airflow_files(pg_
         collected = client.post("/v1/collect", json={})
         assert collected.status_code == 200
         assert collected.json()["database_registration"]["status"] == "synced"
+
+
+def test_readonly_website_queries_filter_page_and_preserve_versions(pg_setup):
+    from fastapi.testclient import TestClient
+
+    from aiops.api import create_app
+    from aiops.storage import views
+
+    settings, service, config = pg_setup
+    seed(service, day="2020-01-01")
+    first = submit(settings, "daily", "2020-01-01", config=config, interval_minutes=1440)
+    with Worker(settings, provider=FakeProvider()) as worker:
+        worker.once()
+    seed(service, day="2020-01-02", suffix="two")
+    seed(service, day="2020-01-01", suffix="revision-two")
+    with TestClient(create_app(settings, token="key", sources_config=config)) as client:
+        client.headers["X-AIOps-Key"] = "key"
+        latest = client.get("/v1/reports").json()
+        assert latest["total"] == 2
+        assert latest["items"][0]["period"]["start"] == "2020-01-02"
+        assert latest["items"][1]["revision"] == 2
+        history = client.get("/v1/reports?history=true&page_size=1&page=2").json()
+        assert history["total"] == 3 and len(history["items"]) == 1
+        filtered = client.get("/v1/reports?history=true&severity=WARNING&status=COMPLETED").json()
+        assert filtered["total"] == 1
+        assert client.get("/v1/reports?start=2020-01-02&end=2020-01-02").json()["total"] == 1
+        assert client.get("/v1/reports?page=100").json()["total"] == 2
+        assert client.get("/v1/reports?start=2020-01-03&end=2020-01-01").status_code == 422
+        assert client.get("/v1/reports?page_size=101").status_code == 422
+        assert client.get("/v1/reports?type=invalid").status_code == 422
+        detail = client.get("/v1/reports/" + first["report_id"]).json()
+        assert detail["result"]["report"]["summary"]
+        assert detail["evidence"]
+        assert "input_json" not in detail
+        assert client.get("/v1/reports/not-existing").status_code == 404
+        assert client.get("/v1/jobs?status=COMPLETED").json()["total"] == 1
+        assert client.get("/v1/collections").json()["total"] == 3
+    # Queries use a read-only session: an accidental write cannot succeed.
+    with views.connection(settings) as db:
+        with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+            db.execute("DELETE FROM public.aiops_analysis_jobs")
+    assert views.reports(settings, history=True)["total"] == 3

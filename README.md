@@ -1,8 +1,8 @@
 # eft-library-aiops
 
-EFT Library의 로그와 서버 상태를 수집하고 Codex로 장애 원인과 개선 방향을 분석하는 Python 도구입니다. 현재 **Phase 1의 Codex 분석 연결과 Phase 2의 로그·시스템 상태 수집**을 구현했습니다. 일일·주간·월간 입력 통합과 버전별 보고서 저장도 지원합니다. PostgreSQL 보고서 저장·작업 큐·단일 Worker도 지원합니다. 외부 Airflow 프로젝트에서 호출할 HTTP API도 제공합니다.
+EFT Library의 로그와 서버 상태를 수집하고 Codex로 장애 원인과 개선 방향을 분석하는 Python 도구입니다. 현재 **Phase 1의 Codex 분석 연결과 Phase 2의 로그·시스템 상태 수집**을 구현했습니다. 일일·주간·월간 입력 통합과 버전별 보고서 저장도 지원합니다. PostgreSQL 보고서 저장·작업 큐·단일 Worker도 지원합니다. 외부 Airflow 프로젝트에서 호출할 HTTP API와 4003 포트의 조회 전용 웹도 제공합니다.
 
-향후 AIOps 웹 서비스의 기본 포트는 **백엔드(FastAPI) 9023**, **프론트엔드(추가 시) 4003**으로 사용합니다. `aiops serve`는 백엔드 9023 포트를 사용하며 CLI 수집·분석은 포트를 열지 않습니다.
+향후 AIOps 웹 서비스의 기본 포트는 **백엔드(FastAPI) 9023**, **조회 웹 4003**으로 사용합니다. `aiops serve`는 백엔드 9023 포트를 사용하며 CLI 수집·분석은 포트를 열지 않습니다.
 
 ## 준비
 
@@ -36,15 +36,29 @@ AIOPS_API_TOKEN=직접_생성한_비밀키
 
 ```sh
 # 최초 준비: 테이블 초기화, 기존 보고서·배치 등록, DB 연결 확인
-./init.sh
+./scripts/init.sh
 
-# API 백그라운드 시작/재시작. 의존성 반영과 상태 확인까지 수행합니다.
+# API와 조회 웹을 백그라운드에서 함께 시작/재시작합니다.
 ./restart.sh
 ```
 
 이후에는 Airflow가 수집·보고서 접수·Worker 실행을 HTTP로 호출합니다. **[API 호출 안내](docs/AIRFLOW_API.md)**를 참고하세요. 별도 상시 Worker 서비스는 필요하지 않습니다. Airflow DAG와 스케줄은 별도 프로젝트에서 관리합니다.
 
 수동 진단은 `collect --all`, `report run --type daily`, `worker --once`, `status`로 할 수 있습니다. 수집은 DB 등록까지 자동 처리하고, report run은 입력 준비·큐 등록을 통합합니다. DB 없는 로컬 모드에서는 report run이 직접 Codex를 호출합니다. `db`, `jobs`, `report prepare`는 관리·복구용입니다.
+
+### 조회 전용 웹 (4003)
+
+대시보드, 일일·주간·월간 보고서 목록과 상세, 수집 현황, 분석 작업 현황을 제공합니다. 기간·위험도·분석 상태로 조회하고 이전 수정본도 확인할 수 있습니다. 실행·재시도·설정 변경 기능은 없습니다.
+
+최신 코드를 반영한 뒤 다음으로 API와 웹을 실행합니다. 기존 DB는 그대로 사용하며 추가 마이그레이션이나 Node/npm 설치는 필요 없습니다.
+
+```sh
+./restart.sh          # API :9023 + 조회 웹 :4003 함께 재시작
+```
+
+브라우저에서 `http://운영서버주소:4003`으로 접속합니다. 웹 서버는 기본 `http://127.0.0.1:9023`의 API를 조회하며 기존 .env의 AIOPS_API_TOKEN을 서버에서만 사용합니다. API 주소가 다르면 AIOPS_WEB_API_URL을 지정합니다.
+
+`./scripts/restart-web.sh status`로 실행 상태를 확인하고 `./scripts/restart-web.sh stop`으로 종료합니다. 웹 로그는 한국 시간 날짜별 `log_history/web-YYYY-MM-DD.log`에 저장합니다. API와 웹은 각각 별도 프로세스이며 웹을 종료해도 Airflow/API 작업에는 영향을 주지 않습니다. 자세한 구성은 [WEB.md](docs/WEB.md)를 참고하세요.
 
 ### .env를 사용하는 경우 (선택)
 
@@ -212,4 +226,4 @@ AIOPS_RUN_INTEGRATION=1 uv run pytest -q -m integration
 
 [보안 및 배포 안내](docs/SECURITY.md), [입력 계약 초안](docs/BATCH_CONTRACT.md), [Phase 1](docs/PHASE1.md), [Phase 2](docs/PHASE2.md), [Phase 3](docs/PHASE3.md)를 참고하세요.
 
-API 재시작은 `./restart.sh`, 상태 확인은 `./restart.sh status`, 종료는 `./restart.sh stop`입니다. 로그는 `tail -f "log_history/api-$(TZ=Asia/Seoul date +%F).log"`으로 확인합니다. 로그 파일은 한국 시간 기준 날짜별로 나뉘고 실행 중 자정이 지나도 자동 전환됩니다. `log_history/`는 Git에서 제외합니다. 재부팅 후 자동 시작 기능은 포함하지 않습니다.
+API와 웹의 통합 재시작은 `./restart.sh`, 전체 상태 확인은 `./restart.sh status`, 전체 종료는 `./restart.sh stop`입니다. API만 관리할 때는 `./scripts/restart-api.sh`, 웹만 관리할 때는 `./scripts/restart-web.sh`를 같은 방식으로 사용합니다. 로그는 `tail -f "log_history/api-$(TZ=Asia/Seoul date +%F).log"`으로 확인합니다. 로그 파일은 한국 시간 기준 날짜별로 나뉘고 실행 중 자정이 지나도 자동 전환됩니다. `log_history/`는 Git에서 제외합니다. 재부팅 후 자동 시작 기능은 포함하지 않습니다.
