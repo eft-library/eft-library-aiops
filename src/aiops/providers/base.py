@@ -31,6 +31,14 @@ class Finding(BaseModel):
     recommended_checks: list[str]
 
 
+class AnalysisSection(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    status: Literal['ISSUES_OBSERVED', 'NO_ISSUES_OBSERVED', 'INSUFFICIENT_DATA']
+    summary: str
+    findings: list[Finding]
+    limitations: list[str]
+
+
 class Report(BaseModel):
     model_config = ConfigDict(extra='forbid')
     summary: str
@@ -38,6 +46,9 @@ class Report(BaseModel):
     findings: list[Finding]
     limitations: list[str]
     automatic_changes_performed: Literal[False]
+    # Older stored reports did not have these sections.
+    incident_analysis: AnalysisSection | None = None
+    performance_analysis: AnalysisSection | None = None
 
 
 @dataclass(frozen=True)

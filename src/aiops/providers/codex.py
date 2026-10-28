@@ -116,7 +116,12 @@ class CodexProvider:
                         data_file(Path(schema), os.O_WRONLY | os.O_CREAT | os.O_TRUNC),
                         "w",
                     ) as stream:
-                        json.dump(Report.model_json_schema(), stream)
+                        output_schema = Report.model_json_schema()
+                        # Wire schema is explicit, while stored legacy JSON stays readable.
+                        output_schema["required"] = list(output_schema["properties"])
+                        for field in ("incident_analysis", "performance_analysis"):
+                            output_schema["properties"][field].pop("default", None)
+                        json.dump(output_schema, stream)
                     command = [
                         binary,
                         "--ask-for-approval",

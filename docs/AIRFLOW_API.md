@@ -89,3 +89,7 @@ API 재시작 후에도 작업 큐·분석 결과는 DB에 남는다. 중단된 
 ## 조회 웹
 
 조회 전용 웹은 별도 4003 포트에서 실행한다. `./scripts/restart-web.sh`로 시작하며 기존 API와 같은 DB를 API를 통해 조회한다. 브라우저에는 API 키를 전달하지 않고 웹 서버가 GET 허용 목록으로만 대리 조회한다. [WEB.md](WEB.md)를 참고한다.
+
+## 일일 점검 확장
+
+기존 type=daily 호출 한 번에 장애 분석과 성능 분석도 같은 보고서 안에 포함된다. Airflow DAG나 요청 body를 추가하지 않는다. 결과의 result.report.incident_analysis / performance_analysis에서 각 구역의 status/summary/findings/limitations를 확인한다. 이전 완료 보고서에는 해당 필드가 없을 수 있다. 성능 근거가 없으면 INSUFFICIENT_DATA로 표시하며, 이것은 분석 작업 실패가 아니다. 자세한 계약은 [REPORTING.md](REPORTING.md)를 따른다.

@@ -87,7 +87,10 @@ def test_provider_result_and_metadata(settings, monkeypatch):
         assert 'TEST_SECRET' not in kwargs['env']
         assert 'OPENAI_API_KEY' not in kwargs['env']
         assert Path(kwargs['cwd']).is_dir()
-        assert Path(command[command.index('--output-schema') + 1]).is_file()
+        schema = json.loads(Path(command[command.index('--output-schema') + 1]).read_text())
+        assert set(schema['required']) == set(schema['properties'])
+        assert 'incident_analysis' in schema['properties']
+        assert 'performance_analysis' in schema['properties']
         return 0, events(), ''
     monkeypatch.setattr(codex, 'run', fake_run)
     result = codex.CodexProvider(settings).analyze(AnalysisRequest('{"secret": "input-only"}'))

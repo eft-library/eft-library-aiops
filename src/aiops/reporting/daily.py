@@ -5,6 +5,7 @@ from datetime import datetime
 
 from aiops.collectors.models import Batch
 from aiops.reporting.periods import day_for
+from aiops.reporting.selection import IMPORTANCE, balanced_groups
 
 IMPORTANT = {"WARNING", "ERROR", "FATAL", "CRITICAL"}
 
@@ -64,17 +65,19 @@ def daily_input(collection, period, expected_services, interval):
             sample = representatives[event.service]
             if len(sample) < 10:
                 sample.append(event.model_dump(mode="json"))
-            elif event.level in IMPORTANT:
-                normal = next(
-                    (
-                        i
-                        for i, value in enumerate(sample)
-                        if value["level"] not in IMPORTANT
-                    ),
-                    None,
-                )
-                if normal is not None:
-                    sample[normal] = event.model_dump(mode="json")
+            else:
+                incoming_latency = event.metadata.get("response_time_ms") is not None
+                latency_count = sum(value.get("metadata", {}).get("response_time_ms") is not None for value in sample)
+                existing_latency = latency_count > 0
+                candidates = [
+                    i for i, value in enumerate(sample)
+                    if value.get("metadata", {}).get("response_time_ms") is None
+                    or latency_count > 1
+                ]
+                if candidates:
+                    index = min(candidates, key=lambda i: IMPORTANCE.get(sample[i]["level"], 0))
+                    if (incoming_latency and not existing_latency) or IMPORTANCE.get(event.level, 0) > IMPORTANCE.get(sample[index]["level"], 0):
+                        sample[index] = event.model_dump(mode="json")
             if event.level in IMPORTANT:
                 signature = re.sub(r"\b\d+\b", "#", event.message)
                 key = (event.service, event.level, signature)
@@ -206,6 +209,7 @@ def daily_input(collection, period, expected_services, interval):
     snapshot = {
         "schema_version": 1,
         "analysis_type": "daily",
+        "analysis_sections": ["incident_analysis", "performance_analysis"],
         "period": period.as_dict(),
         "source_batch_ids": batch_ids[:64],
         "source_batch_count": len(batch_ids),
@@ -213,7 +217,7 @@ def daily_input(collection, period, expected_services, interval):
         "totals": {"events": total_events},
         "level_counts": {key: dict(value) for key, value in counts.items()},
         "http_summary": http,
-        "error_groups": sorted(groups.values(), key=lambda item: -item["count"])[:100],
+        "error_groups": balanced_groups(groups.values()),
         "events": [
             value
             for service in sorted(representatives)

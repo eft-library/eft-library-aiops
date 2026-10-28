@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 from pathlib import Path
 
 from aiops.collectors.config import load_config
@@ -8,6 +9,7 @@ from aiops.data_permissions import data_directory
 from aiops.providers.base import AnalysisRequest, ErrorKind, ProviderError
 from aiops.reporting.daily import daily_input
 from aiops.reporting.periods import for_period
+from aiops.reporting.selection import trim_daily_detail
 from aiops.reporting.store import encoded, open_report_store
 
 
@@ -19,6 +21,8 @@ def fit_input(snapshot, limit):
         "Input size cap omitted representative detail; manifest.json retains complete batch/report lineage."
     )
     while len(encoded(snapshot).encode()) > limit:
+        if snapshot.get("analysis_type") == "daily" and trim_daily_detail(snapshot):
+            continue
         if snapshot.get("events"):
             snapshot["events"].pop()
         elif snapshot.get("error_groups"):
@@ -33,6 +37,16 @@ def fit_input(snapshot, limit):
             if detailed:
                 max(detailed, key=lambda item: len(encoded(item)))["findings"].pop()
             else:
+                sections = [section for child in children for section in child.get("specialist_analysis", {}).values()]
+                detailed_section = next((section for section in sections if section.get("limitations")), None)
+                if detailed_section:
+                    detailed_section["limitations"].pop()
+                    continue
+                long_section = [section for section in sections if len(section["summary"]) > 120]
+                if long_section:
+                    section = max(long_section, key=lambda item: len(item["summary"]))
+                    section["summary"] = section["summary"][:max(120, len(section["summary"]) // 2)]
+                    continue
                 long = [child for child in children if len(child["summary"]) > 160]
                 if not long:
                     raise ValueError("report metadata exceeds configured input limit")
@@ -62,11 +76,38 @@ def validate_references(result, snapshot):
                 visit(item)
 
     visit(snapshot)
-    if any(
-        evidence not in allowed
-        for finding in result.report.findings
-        for evidence in finding.evidence_ids
-    ):
+    sections = [result.report.incident_analysis, result.report.performance_analysis]
+    if snapshot.get("analysis_type") == "daily" and snapshot.get("analysis_sections"):
+        if any(section is None for section in sections):
+            raise ProviderError(ErrorKind.OUTPUT)
+    findings = list(result.report.findings)
+    for section in sections:
+        if section is None:
+            continue
+        if section.status == "ISSUES_OBSERVED" and not section.findings:
+            raise ProviderError(ErrorKind.OUTPUT)
+        if section.status == "NO_ISSUES_OBSERVED":
+            if not snapshot.get("data_quality", {}).get("complete"):
+                raise ProviderError(ErrorKind.OUTPUT)
+            if snapshot.get("analysis_type") == "daily" and section is result.report.performance_analysis and not (
+                any(
+                    value.get("samples", 0) >= 2 and any(
+                        isinstance(value.get(key), (int, float)) and not isinstance(value.get(key), bool)
+                        and math.isfinite(value[key]) for key in ("min", "max", "mean")
+                    ) for value in snapshot.get("metrics", [])
+                ) or any(
+                    value.get("latency_samples", 0) >= 2 and any(
+                        isinstance(value.get(key), (int, float)) and not isinstance(value.get(key), bool)
+                        and math.isfinite(value[key])
+                        for key in ("max_response_time_ms", "mean_response_time_ms")
+                    ) for value in snapshot.get("http_summary", {}).values()
+                )
+            ):
+                raise ProviderError(ErrorKind.OUTPUT)
+        if any(not finding.evidence_ids for finding in section.findings):
+            raise ProviderError(ErrorKind.OUTPUT)
+        findings.extend(section.findings)
+    if any(evidence not in allowed for finding in findings for evidence in finding.evidence_ids):
         raise ProviderError(ErrorKind.OUTPUT)
 
 
@@ -101,6 +142,14 @@ def brief(row):
         "summary": result["summary"][:800],
         "severity": result["severity"],
         "findings": findings,
+        "specialist_analysis": {
+            key: {
+                "status": result[key]["status"],
+                "summary": result[key]["summary"][:300],
+                "limitations": [value[:160] for value in result[key]["limitations"][:2]],
+            }
+            for key in ("incident_analysis", "performance_analysis") if result.get(key)
+        },
         "limitations": [value[:200] for value in result["limitations"][:3]],
     }
 
@@ -149,7 +198,7 @@ class ReportingService:
                     "instructions_sha256": hashlib.sha256(
                         INSTRUCTIONS.encode()
                     ).hexdigest(),
-                    "input_contract": 2,
+                    "input_contract": 3,
                 }
                 manifest["max_input_bytes"] = min(90000, self.settings.max_input_bytes)
                 fingerprint = hashlib.sha256(encoded(manifest).encode()).hexdigest()

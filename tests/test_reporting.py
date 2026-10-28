@@ -37,6 +37,14 @@ class FakeProvider:
                 "findings": [],
                 "limitations": ["테스트 결과"],
                 "automatic_changes_performed": False,
+                "incident_analysis": {
+                    "status": "INSUFFICIENT_DATA", "summary": "관측 범위 제한",
+                    "findings": [], "limitations": ["일부 데이터만 관측됨"],
+                },
+                "performance_analysis": {
+                    "status": "INSUFFICIENT_DATA", "summary": "성능 판단 근거 부족",
+                    "findings": [], "limitations": ["충분한 성능 표본 없음"],
+                },
             },
         )
 

@@ -525,7 +525,7 @@ def test_actual_provider_path_uses_global_gate_inside_worker(pg_setup, monkeypat
             assert error.value.kind == ErrorKind.BUSY
             assert "PGPASSWORD" not in kwargs["env"]
             assert "AIOPS_DATABASE_URL" not in kwargs["env"]
-            return 0, events(), ""
+            return 0, events(FakeProvider().analyze(AnalysisRequest("{}")).report.model_dump()), ""
 
         monkeypatch.setattr(codex, "run", fake_run)
         with Worker(settings) as worker:
@@ -872,3 +872,44 @@ def test_readonly_website_queries_filter_page_and_preserve_versions(pg_setup):
         with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
             db.execute("DELETE FROM public.aiops_analysis_jobs")
     assert views.reports(settings, history=True)["total"] == 3
+
+
+def test_daily_specialist_sections_survive_worker_storage_api_and_weekly_summary(pg_setup):
+    from fastapi.testclient import TestClient
+
+    from aiops.api import create_app
+    from aiops.providers.base import AnalysisSection, Finding
+    from aiops.reporting.service import brief
+    from aiops.storage import views
+
+    settings, service, config = pg_setup
+    seed(service)
+
+    class SpecialistProvider(FakeProvider):
+        def analyze(self, request):
+            result = super().analyze(request)
+            source = json.loads(request.snapshot)
+            result.report.incident_analysis = AnalysisSection(
+                status="ISSUES_OBSERVED", summary="오류는 관측됐지만 영향 범위는 확인되지 않았습니다.",
+                findings=[Finding(issue="FastAPI 오류 관측", hypothesis="원인 확정 불가",
+                    evidence_ids=[source["events"][0]["event_id"]], recommended_checks=["운영자 검토용: 같은 시각 DB 로그 확인"])],
+                limitations=["요청 영향 자료 없음"],
+            )
+            return result
+
+    job = submit(settings, "daily", "2020-01-01", config=config, interval_minutes=1440)
+    with Worker(settings, provider=SpecialistProvider()) as worker:
+        assert worker.once()["status"] == "COMPLETED"
+    with TestClient(create_app(settings, token="key", sources_config=config)) as client:
+        response = client.get("/v1/reports/" + job["report_id"], headers={"X-AIOps-Key": "key"})
+        assert response.status_code == 200
+        report = response.json()["result"]["report"]
+        assert report["incident_analysis"]["status"] == "ISSUES_OBSERVED"
+        assert report["performance_analysis"]["status"] == "INSUFFICIENT_DATA"
+    store = PostgresReportStore(settings.data_dir / "reports", settings)
+    try:
+        child = brief(store.row(job["report_id"]))
+        assert child["specialist_analysis"]["incident_analysis"]["summary"]
+    finally:
+        store.close()
+    assert views.reports(settings)["total"] == 1
