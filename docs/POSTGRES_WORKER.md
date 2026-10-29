@@ -1,10 +1,12 @@
 # PostgreSQL 저장소와 단일 Worker — 서버 적용 안내
 
-운영에서는 전용 DB를 다시 만든 상태다. 아래 명령으로 최신 테이블을 초기화한 뒤 Worker를 검증한다. 현재 구현은 로컬의 실제 PostgreSQL 17과 가짜 AI Provider로 검증했다. 기존 서비스 테이블·설정·방화벽을 바꾸지 않는다.
+문서의 `<...>` 값과 `/example/` 경로는 예시입니다. 복사해서 실행하기 전에 실제 배포 환경의 값으로 바꾸세요.
+
+새 DB를 준비한 경우 아래 명령으로 최신 테이블을 초기화한 뒤 Worker를 검증한다. 현재 구현은 로컬의 실제 PostgreSQL 17과 가짜 AI Provider로 검증했다. 기존 서비스 테이블·설정·방화벽을 바꾸지 않는다.
 
 ## 운영 기준: Docker Airflow → API
 
-운영은 [AIRFLOW_API.md](AIRFLOW_API.md)를 따른다. API는 호스트 9023에서 상시 실행하고, Docker Airflow가 HTTP로 수집·보고서 접수·Worker 1회 실행을 호출한다. 별도 상시 Worker 서비스는 필요 없다. 아래 CLI·systemd 설명은 수동 진단 또는 대체 운영 방식이다.
+운영은 [AIRFLOW_API.md](AIRFLOW_API.md)를 따른다. API는 호스트에서 상시 실행하고, Docker Airflow가 HTTP로 수집·보고서 접수·Worker 1회 실행을 호출한다. 별도 상시 Worker 서비스는 필요 없다. 아래 CLI·systemd 설명은 수동 진단 또는 대체 운영 방식이다.
 
 ## 수동 진단에서 사용할 명령
 
@@ -41,11 +43,11 @@ jobs submit    → PostgreSQL 작업 큐
 
 `AIOPS_DATABASE_URL`이 없으면 기존 SQLite 보고서 모드가 유지된다. 설정하면 보고서 원본과 큐는 PostgreSQL을 사용한다. Collector는 계속 DB·Codex 없이 동작하며 체크포인트는 SQLite에 둔다. 같은 DB를 사용하는 모든 실행은 **같은 호스트·같은 AIOPS_DATA_DIR**를 사용한다. 여러 호스트의 로컬 파일을 공유하는 구조는 지원하지 않는다.
 
-백엔드 HTTP 9023·향후 프론트 4003은 별도다. 이번 Worker는 HTTP 포트를 열지 않으며 기존 PostgreSQL 13245에 접속한다. FastAPI API를 제공하며 Airflow DAG는 별도 프로젝트에서 관리한다.
+API와 조회 웹은 별도 프로세스다. Worker는 HTTP 포트를 열지 않으며 설정된 PostgreSQL에 접속한다. FastAPI API를 제공하며 Airflow DAG는 별도 프로젝트에서 관리한다.
 
-## 이미 DB를 다시 만든 현재 운영 환경
+## 이미 DB가 준비된 환경
 
-기존 .env의 접속 계정·비밀번호를 유지하고 `dbname=aiops`와 `AIOPS_SOURCES_CONFIG=config/log_sources.yaml`을 확인한다. DB를 이미 만들었으므로 create_database.sql은 다시 실행하지 않는다. 최신 코드를 반영한 뒤 `uv sync --locked`, `uv run aiops --env-file .env setup`을 실행하면 준비가 끝난다.
+기존 .env의 접속 대상·계정·비밀번호와 `AIOPS_SOURCES_CONFIG=config/log_sources.yaml`을 확인한다. DB를 이미 만들었으므로 create_database.sql은 다시 실행하지 않는다. 최신 코드를 반영한 뒤 `uv sync --locked`, `uv run aiops --env-file .env setup`을 실행하면 준비가 끝난다.
 
 setup 결과 database 항목의 정상 기준은 `schema: public`, `migration: 2`다. 새 DB에는 public.aiops_* 7개 테이블이 생성된다. 실행 계정에 public의 CREATE 권한이 필요하다. DB 소유 계정이면 기본적으로 가능하며, 다른 계정을 사용한다면 관리자가 해당 계정에 public의 USAGE/CREATE 권한을 부여해야 한다.
 
@@ -55,12 +57,12 @@ setup 결과 database 항목의 정상 기준은 `schema: public`, `migration: 2
 
 ## 1. 서버에서 전용 DB와 접속 계정 준비
 
-기본 제안은 기존 PostgreSQL 서버 안의 **DB aiops / 역할 aiops_app**이다. PostgreSQL 관리자로 한 번 실행한다. 운영체제 root와 PostgreSQL 로그인 역할은 별개다.
+전용 DB와 접속 역할을 준비한다. 아래 SQL 스크립트의 DB·역할 이름은 예시이므로 배포 환경에 맞춰 검토한 뒤 PostgreSQL 관리자로 한 번 실행한다. 운영체제 계정과 PostgreSQL 로그인 역할은 별개다.
 
 ```sh
-# Rocky/PGDG 설치 경로 예시. 실제 psql 경로가 다르면 조정한다.
-runuser -u postgres -- /usr/pgsql-17/bin/psql -p 13245 -d postgres \
-  < /home/aiops/eft-library-aiops/deploy/create_database.sql
+# PGPORT에 실제 DB 포트를 지정한다. psql 경로도 설치 환경에 맞게 조정한다.
+runuser -u postgres -- /usr/pgsql-17/bin/psql -p "$PGPORT" -d postgres \
+  < /example/aiops/deploy/create_database.sql
 ```
 
 이 SQL은 `aiops_app` 역할을 만들고, `\password`로 비밀번호를 두 번 입력받은 뒤 전용 DB를 만든다. 비밀번호를 SQL 파일이나 채팅에 넣지 않는다. 역할·DB가 이미 있으면 스크립트를 반복 적용하지 말고 해당 생성 줄을 생략해 검토한다. 기존 운영 DB를 사용하기로 했다면 이후 연결값을 바꾸고 public의 aiops_ 접두사 테이블을 쓰되, 기존 public의 다른 테이블은 그대로 둔다.
@@ -70,7 +72,7 @@ runuser -u postgres -- /usr/pgsql-17/bin/psql -p 13245 -d postgres \
 기존 모델·데이터 경로 값은 유지하고 다음을 추가한다.
 
 ```dotenv
-AIOPS_DATABASE_URL="host=127.0.0.1 port=13245 dbname=aiops user=aiops_app"
+AIOPS_DATABASE_URL="host=<DB_HOST> port=<DB_PORT> dbname=<DB_NAME> user=<DB_USER>"
 PGPASSWORD="위에서_설정한_DB_비밀번호"
 AIOPS_SOURCES_CONFIG=config/log_sources.yaml
 ```
@@ -78,12 +80,12 @@ AIOPS_SOURCES_CONFIG=config/log_sources.yaml
 비밀번호는 libpq의 PGPASSWORD로 읽는다. URL 안에 넣지 않아 URL 인코딩이 필요하지 않다. 비밀번호를 별도 파일에 두려면 libpq의 PGPASSFILE을 사용할 수 있으며 해당 파일은 600으로 제한하고 Git에서 제외한다. AIOPS_DATABASE_URL도 password 필드를 포함할 수 있으므로 프로그램은 값과 서버 오류 원문을 출력하지 않는다. Codex 자식 프로세스에는 DB URL·PGPASSWORD·PGPASSFILE을 전달하지 않는다.
 
 ```sh
-cd /home/aiops/eft-library-aiops
+cd /example/aiops
 chmod 600 .env
 uv sync --locked
 ```
 
-aiops_data의 폴더 755·파일 644 정책과 인증 설정 파일의 권한은 별개다. root는 기존과 동일하게 Codex 로그인한 계정을 사용한다.
+aiops_data의 폴더 755·파일 644 정책과 인증 설정 파일의 권한은 별개다. Codex 로그인과 실행은 같은 계정을 사용한다.
 
 ## 3. 테이블 SQL 검토·적용·연결 확인
 
@@ -171,7 +173,7 @@ systemctl status eft-aiops-worker
 journalctl -u eft-aiops-worker -n 50 --no-pager
 ```
 
-예시는 root·기존 경로를 기준으로 하며 다른 계정 전환을 요구하지 않는다. KillMode=control-group을 유지해 서비스 종료 시 Codex 자식도 정리한다. SIGTERM/CTRL-C는 현재 프로세스를 종료하고 작업 중단을 기록한다. DB 장애는 오류 종료하여 supervisor가 재시작할 수 있다. 인증/사용량 제한은 해당 작업을 FAILED로 남기고 Worker를 정상 종료해 자동 재시작으로 요청을 반복하지 않는다. 로그인/사용량 문제를 해결한 뒤 jobs retry와 service restart를 수행한다.
+서비스 실행 계정·작업 경로·PATH는 배포 환경에 맞게 지정한다. KillMode=control-group을 유지해 서비스 종료 시 Codex 자식도 정리한다. SIGTERM/CTRL-C는 현재 프로세스를 종료하고 작업 중단을 기록한다. DB 장애는 오류 종료하여 supervisor가 재시작할 수 있다. 인증/사용량 제한은 해당 작업을 FAILED로 남기고 Worker를 정상 종료해 자동 재시작으로 요청을 반복하지 않는다. 로그인/사용량 문제를 해결한 뒤 jobs retry와 service restart를 수행한다.
 
 ## 상태·재시도·취소
 
@@ -203,7 +205,7 @@ DB 결과가 원본이고 aiops_data/reports의 JSON은 출력 뷰다. DB 저장
 
 ## 백업과 되돌리기
 
-Worker와 작업 등록을 멈춘 뒤 PostgreSQL의 public.aiops_* 테이블과 aiops_data 전체를 함께 백업한다. 예: DB 계정 접속을 설정한 환경에서 `pg_dump -p 13245 -d aiops -t 'public.aiops_*' -Fc -f aiops-backup.dump`. 비밀번호는 명령행 인자로 넣지 않는다. 체크포인트 SQLite만 삭제하거나 오래된 DB 백업과 새 파일을 임의로 섞지 않는다.
+Worker와 작업 등록을 멈춘 뒤 PostgreSQL의 public.aiops_* 테이블과 aiops_data 전체를 함께 백업한다. 예: DB 계정 접속을 설정한 환경에서 `pg_dump -p "$PGPORT" -d "$PGDATABASE" -t 'public.aiops_*' -Fc -f aiops-backup.dump`. 비밀번호는 명령행 인자로 넣지 않는다. 체크포인트 SQLite만 삭제하거나 오래된 DB 백업과 새 파일을 임의로 섞지 않는다.
 
 [001_rollback.sql](../src/aiops/storage/sql/001_rollback.sql)은 **해당 테이블의 데이터도 삭제하는 수동 복구 SQL**이다. Worker 중지·백업·검토 후에만 psql로 실행한다. 자동 rollback 명령은 제공하지 않는다. CASCADE를 쓰지 않으므로 외부 FK가 있으면 트랜잭션이 실패하며 기존 애플리케이션 테이블을 함께 삭제하지 않는다.
 

@@ -21,8 +21,8 @@ Python 패키지와 CLI, 환경변수·명시적 dotenv 설정, Codex CLI Provid
 
 명령: `uv run aiops analyze --input config/sample.json`
 
-- 작업 ID: `ebc32b3c-64f9-46ab-a889-23527fcdb2cc`
-- Thread ID: `01a17fc3-9145-7021-b68c-497c2e823c47`
+- 작업 ID: 검증용 식별자 생략
+- Thread ID: 검증용 식별자 생략
 - 심각도: `WARNING`
 - 요약: “관측 구간에서 FastAPI 데이터베이스 연결 시간 초과 오류가 2건 확인되었습니다. PostgreSQL 로그가 수집되지 않아 원인은 확인할 수 없습니다.”
 - 근거: 샘플의 `evt-1`, `evt-2`.

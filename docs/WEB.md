@@ -1,9 +1,11 @@
 # 조회 전용 운영 웹
 
-4003 포트의 웹은 운영 결과를 조회한다. 수집·분석 접수·재시도·취소·설정 변경 기능은 제공하지 않는다. 실행 스케줄과 DAG는 별도 Airflow 프로젝트에서 관리한다.
+문서의 `<...>` 값과 `/example/` 경로는 예시입니다. 복사해서 실행하기 전에 실제 배포 환경의 값으로 바꾸세요.
+
+조회 전용 웹은 운영 결과를 조회한다. 수집·분석 접수·재시도·취소·설정 변경 기능은 제공하지 않는다. 실행 스케줄과 DAG는 별도 Airflow 프로젝트에서 관리한다.
 
 ```text
-브라우저 :4003 → 웹 서버의 GET 조회 프록시 → AIOps API :9023 → PostgreSQL
+브라우저 → 웹 서버의 GET 조회 프록시 → AIOps API → PostgreSQL
 ```
 
 브라우저에 API 키를 전달하지 않는다. 웹 서버만 기존 AIOPS_API_TOKEN을 읽고 API에 전달한다. 웹의 `/read/`는 status, reports, reports/{id}, collections, jobs GET 요청만 허용한다. 외부 경로·임의 URL·POST 요청은 전달하지 않는다. 다른 호스트로의 API redirect도 따르지 않는다. 별도 브라우저 로그인은 현재 제공하지 않으며, 웹에 접속할 수 있는 사용자는 보고서를 조회할 수 있다.
@@ -16,7 +18,7 @@
 ./restart.sh
 ```
 
-브라우저 주소는 `http://호스트주소:4003`이다. API·웹 각각 독립적인 프로세스로 실행한다. restart-web.sh는 의존성 반영 후 웹 프로세스만 교체하고 `/health`에서 준비 상태를 확인한다. API/DB 실제 연결 실패는 화면에서 표시한다. restart.sh는 의존성을 한 번 반영한 뒤 API → 웹 순서로 함께 재시작한다. API 준비 확인이 실패하면 웹 재시작은 진행하지 않는다. 웹 시작이 실패해도 이미 시작한 API는 유지된다. 전체 상태 확인은 `./restart.sh status`, 전체 종료는 `./restart.sh stop`이며 웹 → API 순서로 종료한다. 개별 관리는 `./scripts/restart-api.sh`와 `./scripts/restart-web.sh`를 사용한다.
+브라우저 주소는 `http://<WEB_HOST>:<WEB_PORT>`이다. API·웹 각각 독립적인 프로세스로 실행한다. restart-web.sh는 의존성 반영 후 웹 프로세스만 교체하고 `/health`에서 준비 상태를 확인한다. API/DB 실제 연결 실패는 화면에서 표시한다. restart.sh는 의존성을 한 번 반영한 뒤 API → 웹 순서로 함께 재시작한다. API 준비 확인이 실패하면 웹 재시작은 진행하지 않는다. 웹 시작이 실패해도 이미 시작한 API는 유지된다. 전체 상태 확인은 `./restart.sh status`, 전체 종료는 `./restart.sh stop`이며 웹 → API 순서로 종료한다. 개별 관리는 `./scripts/restart-api.sh`와 `./scripts/restart-web.sh`를 사용한다.
 
 ```sh
 ./scripts/restart-web.sh status
@@ -28,12 +30,12 @@
 선택 설정:
 
 ```dotenv
-AIOPS_WEB_API_URL=http://127.0.0.1:9023
-AIOPS_WEB_HOST=0.0.0.0
-AIOPS_WEB_PORT=4003
+AIOPS_WEB_API_URL=http://<API_HOST>:<API_PORT>
+AIOPS_WEB_HOST=<WEB_BIND_HOST>
+AIOPS_WEB_PORT=<WEB_PORT>
 ```
 
-기존 AIOPS_API_TOKEN을 사용한다. DB 변경이나 npm 빌드는 필요 없다. HTML/CSS/JavaScript는 Python 패키지 안에 포함되므로 `uv sync --locked`만으로 반영된다. CLI 직접 실행은 `uv run aiops --env-file .env web --host 0.0.0.0 --port 4003`이다.
+기존 AIOPS_API_TOKEN을 사용한다. DB 변경이나 npm 빌드는 필요 없다. HTML/CSS/JavaScript는 Python 패키지 안에 포함되므로 `uv sync --locked`만으로 반영된다. CLI 직접 실행은 `uv run aiops --env-file .env web`이다.
 
 ## 화면
 

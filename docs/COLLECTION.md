@@ -13,7 +13,7 @@ uv run aiops collect --all
 # fixture 중 FastAPI만 (시스템 지표는 프로필 설정에 따라 함께 수집)
 uv run aiops collect --service fastapi
 
-# 운영: root 실행 환경을 기준으로 명시적 운영 프로필 사용
+# 운영: 명시적 운영 프로필 사용
 uv run aiops collect --config config/log_sources.yaml --service fastapi
 uv run aiops collect --config config/log_sources.yaml --all
 
@@ -21,7 +21,7 @@ uv run aiops collect --config config/log_sources.yaml --all
 uv run aiops --env-file .env collect --config config/log_sources.yaml --all
 ```
 
-운영 검증은 한 서비스로 시작해 `coverage`, 배치 내용과 마스킹을 확인한 다음 전체로 확장한다. 코드가 서비스·원본 로그·DB 권한이나 설정을 변경하지 않는다. PostgreSQL은 로그 파일만 읽으므로 psql 접속 정보가 필요 없다. 이미 합의한 root 실행을 지원하며, 그만큼 설정에 선언된 수집 경로를 좁게 유지한다.
+운영 검증은 한 서비스로 시작해 `coverage`, 배치 내용과 마스킹을 확인한 다음 전체로 확장한다. 코드가 서비스·원본 로그·DB 권한이나 설정을 변경하지 않는다. PostgreSQL은 로그 파일만 읽으므로 psql 접속 정보가 필요 없다. 실행 계정의 권한에 맞춰 설정에 선언된 수집 경로를 좁게 유지한다.
 
 운영 YAML의 경로가 실제 환경과 다르면 해당 값만 수정한다. YAML 상대 경로는 **YAML 파일이 있는 디렉터리 기준**이다. 기본 fixture 파일은 테스트용 오류이며 실제 장애를 의미하지 않는다. fixture와 운영의 이력을 분리하려면 각 실행에 서로 다른 `AIOPS_DATA_DIR`를 사용한다.
 
@@ -142,7 +142,7 @@ docker:
 
 Docker SDK는 지정한 컨테이너의 상태와 `stats(stream=False, one_shot=True)`만 조회한다. 이전 CPU 샘플이 없으면 CPU 비율을 꾸며내지 않고 생략한다. 상태가 running이 아니면 상태만 남긴다. 컨테이너 stdout·환경변수·설정 원문·이미지 inspect 결과는 배치에 넣지 않는다. Docker 로그는 파일 로그와의 중복 방지를 위해 현재 수집하지 않는다. [Docker SDK 문서](https://docker-py.readthedocs.io/en/stable/containers.html)를 참고한다.
 
-Docker socket은 높은 권한을 제공한다. 현재 root 실행에서도 프로그램은 조회 API만 사용하며 서비스 시작·중지·재시작을 하지 않는다. 테스트는 실제 daemon 없이 대역으로 검증한다.
+Docker socket은 높은 권한을 제공한다. 실행 계정의 권한과 관계없이 프로그램은 조회 API만 사용하며 서비스 시작·중지·재시작을 하지 않는다. 테스트는 실제 daemon 없이 대역으로 검증한다.
 
 ## Airflow 연결 설계
 

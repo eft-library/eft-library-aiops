@@ -4,9 +4,9 @@
 
 ### 웹 연동 시 포트
 
-- AIOps 백엔드(FastAPI): **9023**.
-- AIOps 조회 웹: **4003**.
-- API·웹을 구현할 때 위 값을 기본 포트로 사용한다. 현재 CLI·Worker 실행 자체에는 HTTP 포트가 필요하지 않다.
+- AIOps 백엔드(FastAPI): `AIOPS_API_HOST`, `AIOPS_API_PORT`로 설정한다.
+- AIOps 조회 웹: `AIOPS_WEB_HOST`, `AIOPS_WEB_PORT`로 설정한다.
+- API·웹을 구현할 때 배포 환경에 맞게 주소와 포트를 지정한다. 현재 CLI·Worker 실행 자체에는 HTTP 포트가 필요하지 않다.
 
 Phase 2의 날짜별 로그·지표를 일일 분석하고, 일일 보고서로 주간·월간 분석을 수행한다. 이를 위해 Codex를 **한 번에 하나만 실행**해 장애 원인과 개선안을 제시한다. AI 분석은 권고·보고만 하며 자동 수정·재시작·배포는 하지 않는다. 작업 관리·저장·Airflow 연동을 포함한 구현은 로컬에서 완료하고, 이후 운영에 배포해 실제 환경을 검증한다.
 
@@ -17,7 +17,7 @@ Phase 2의 날짜별 로그·지표를 일일 분석하고, 일일 보고서로 
 - 기간은 시작 포함·끝 제외이며 아직 종료되지 않은 기간은 분석하지 않는다. 월 경계에 걸친 주간 보고서 수치를 월간에 중복 합산하지 않는다.
 - 지연 로그로 입력이 바뀌면 같은 기간의 새 버전을 만든다. 같은 입력으로 완료된 결과는 재사용하고, 하위 보고서 변경은 상위 보고서의 stale 상태로 전파한다.
 - 누락·불완전·오래된 daily는 상위 입력에서 명시한다. 분석 완료와 데이터 완전성은 별도 상태다.
-- 현재 로컬 SQLite 및 PostgreSQL 카탈로그와 `report prepare/run/list`, DB 작업 큐·단일 Worker로 위 계약을 구현했다. PostgreSQL 모드 run은 큐 등록이며 Worker가 실제 분석한다. 호스트 API(9023)를 제공하며 Airflow DAG는 별도 프로젝트에서 관리한다. 상세 계약은 [REPORTING.md](REPORTING.md)를 따른다.
+- 현재 로컬 SQLite 및 PostgreSQL 카탈로그와 `report prepare/run/list`, DB 작업 큐·단일 Worker로 위 계약을 구현했다. PostgreSQL 모드 run은 큐 등록이며 Worker가 실제 분석한다. 호스트 API를 제공하며 Airflow DAG는 별도 프로젝트에서 관리한다. 상세 계약은 [REPORTING.md](REPORTING.md)를 따른다.
 
 ## 2. 입력 계약
 - daily 입력은 전체 일일 집계·관측 지표·제한된 대표 로그와 batch ID 목록을 사용한다. weekly/monthly는 하위 report ID·버전·결과·누락 날짜를 입력으로 사용한다. 각 보고서의 전체 계보는 manifest에 보관한다.
@@ -80,7 +80,7 @@ Phase 2의 날짜별 로그·지표를 일일 분석하고, 일일 보고서로 
 
 ## 7. 데이터 저장
 - 기간 정체성(kind/start/end/timezone), report ID·revision·input fingerprint, batch/child report 의존 관계, 결과·완전성·stale 여부를 PostgreSQL에도 보존한다. 로컬 reports.sqlite3에서 PostgreSQL로 명시적 import-sqlite 이전을 제공하며 기존 이력과 ID를 유지한다. Collector 체크포인트는 SQLite에 유지한다.
-- PostgreSQL 17에 작업 이력 및 분석 결과를 저장한다. 로컬에서는 전용 테스트 DB로 저장·마이그레이션·복구를 검증하고, 운영 접속 설정(포트 **13245**)과 분리한다. 기존 운영 DB 스키마는 **승인 없이 변경 금지**.
+- PostgreSQL 17에 작업 이력 및 분석 결과를 저장한다. 로컬에서는 전용 테스트 DB로 저장·마이그레이션·복구를 검증하고, 운영 접속 설정과 분리한다. 기존 운영 DB 스키마는 **승인 없이 변경 금지**.
 - Phase 3에서 마이그레이션 SQL과 적용·복구 절차를 작성하고 로컬 전용 DB에 적용해 검증한다. 운영 적용은 전용 DB의 public.aiops_ 테이블를 대상으로 검토·승인 후 수행한다.
 - 대량 원본 로그는 PostgreSQL에 적재하지 않고 Phase 2 배치/원본 경로를 참조한다.
 - 재분석 시 동일 배치를 식별하고 중복 보고서 생성을 방지한다.
@@ -149,4 +149,4 @@ public.aiops_ 테이블 SQL, PostgreSQL 보고서/배치 참조 저장소, 중�
 
 ## 조회 전용 웹 구현
 
-4003 포트의 조회 웹과 GET 전용 서버 프록시, 보고서 목록·필터·페이지 조회, 서비스별 수집 현황·작업 상태, 보고서 상세의 근거·한계·품질 표시를 구현했다. 실행·재시도·취소·설정 변경 UI는 없다. 배포와 접근 범위는 [WEB.md](WEB.md)를 따른다.
+조회 웹과 GET 전용 서버 프록시, 보고서 목록·필터·페이지 조회, 서비스별 수집 현황·작업 상태, 보고서 상세의 근거·한계·품질 표시를 구현했다. 실행·재시도·취소·설정 변경 UI는 없다. 배포와 접근 범위는 [WEB.md](WEB.md)를 따른다.

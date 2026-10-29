@@ -126,7 +126,7 @@ SQLite가 보고서의 원본이며 JSON 파일은 조회/검토용 출력이다
 
 이전 배치에 metrics.jsonl이 없으면 snapshot.json에 남은 지표만 사용하고 legacy_metrics_batches를 기록한다. 이전 요약에서 생략된 지표·수집 이전 이력·해석 불가능한 시각은 새 기능만으로 복원할 수 없다. 운영에서 이미 확인한 파서 미인식·수집 한도 문제는 별도로 보완해야 한다.
 
-기본 로컬 SQLite 보고서 카탈로그와 선택적 PostgreSQL 저장소가 같은 기간·버전·의존 관계 계약을 사용한다. 검증 결과는 [REPORTING_VALIDATION.md](REPORTING_VALIDATION.md)에 기록한다. PostgreSQL 저장소·작업 큐/단일 Worker는 구현했으며 FastAPI(9023) 조회·Airflow DAG는 이후 연결한다. 프론트 추가 시 기본 포트는 4003이다. 운영 DB 변경이나 스케줄 설치는 이번 변경에 포함하지 않는다.
+기본 로컬 SQLite 보고서 카탈로그와 선택적 PostgreSQL 저장소가 같은 기간·버전·의존 관계 계약을 사용한다. 검증 결과는 [REPORTING_VALIDATION.md](REPORTING_VALIDATION.md)에 기록한다. PostgreSQL 저장소·작업 큐/단일 Worker는 구현했으며 FastAPI 조회·Airflow DAG는 이후 연결한다. 프론트 주소와 포트는 배포 환경에서 설정한다. 운영 DB 변경이나 스케줄 설치는 이번 변경에 포함하지 않는다.
 
 예정 스케줄 예시는 5분 수집, 매일 00:15 전날 분석, 월요일 01:00 지난주 분석, 매월 1일 02:00 지난달 분석이다. 실제 실행 시각보다 **하위 보고서 완료 의존성**을 우선한다. 장애·사용량 제한으로 일일 분석이 밀리면 상위 작업은 누락을 표시하거나 기다렸다가 재시도해야 한다. 지연 도착 재분석 범위와 자동 재처리 주기는 Worker/DAG 도입 시 정한다.
 

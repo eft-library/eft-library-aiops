@@ -3,36 +3,36 @@
 ## 1. 목표
 Codex 호출 없이도 기존 서비스의 로그와 시스템 상태를 **읽기 전용·증분 방식**으로 수집, 정규화, 요약하여 Phase 3에 전달할 JSON을 생성한다. 로컬에서 fixture 로그와 시스템 수집 대역을 사용해 개발을 완료하고, 전체 개발 완료 후 운영 배포 시 실제 수집을 검증한다. 운영 서비스 설정은 변경하지 않는다.
 
-## 2. 수집 대상과 운영 배포용 호스트 경로
-아래 경로는 운영 환경을 위한 설정값이며 로컬에서 존재할 필요가 없다. 운영 프로필과 로컬 fixture 프로필을 분리하고, 기본 개발·테스트 실행은 fixture 경로를 사용한다. 실제 배포 시 경로·로그 형식·권한을 재확인한다.
+## 2. 수집 대상과 경로 예시
+아래 경로는 설명용 예시이며 실제 운영 경로를 나타내지 않는다. 운영 프로필과 로컬 fixture 프로필을 분리하고, 기본 개발·테스트 실행은 fixture 경로를 사용한다. 실제 배포 시 경로·로그 형식·권한을 재확인한다.
+
 | 서비스 | 로그 경로 | 유형/비고 |
 |---|---|---|
-| Next.js | `/home/frontend_a/eft-library-front/log.out` | 단일 파일 |
-| FastAPI | `/home/backend/eft-library-back/log.out` | 단일 파일; `log.out.bak` 존재, 기본 수집 제외 |
-| PostgreSQL 17 | `/var/lib/pgsql/17/data/log/` | `postgresql-*.log`; 실제 설정 `postgresql-%a.log` |
-| Redis | `/var/log/redis/redis.log` | 단일 파일, 권한 제한 |
-| Kafka | `/home/kafka/kafka_2.13-4.1.1/kafka.log` | 실행 스크립트 stdout/stderr |
-| Kafka 상세 | `/home/kafka/kafka_2.13-4.1.1/logs/` | server/controller/state-change/log-cleaner/request/authorizer/GC 등 |
-| Kafka Consumer | `/home/kafka/eft-library-kafka/logs/` | consumer.log, log.log, notification.log 및 회전 파일 |
-| Airflow 태스크 | `/home/airflow/logs/` | `dag_id=*/run_id=*/task_id=*/attempt=*.log`, 재귀 탐색 |
-| Airflow DAG Processor | `/home/airflow/logs/dag_processor/` | 날짜별 로그, 상위 Airflow 수집에 포함 |
-| Airflow Health | `/home/airflow/latest_data/health_check.log` | 단일 파일 |
-| Nginx Proxy Manager | `/home/tool/npm/data/logs/` | access/error/letsencrypt/default/fallback 및 회전 파일 |
-| RustFS | `/home/tool/rustfs/logs/` | rustfs.log 및 날짜별 회전 파일 |
+| Next.js | `/example/logs/nextjs/log.out` | 단일 파일 |
+| FastAPI | `/example/logs/fastapi/log.out` | 단일 파일; `log.out.bak` 존재, 기본 수집 제외 |
+| PostgreSQL 17 | `/example/logs/postgresql/` | `postgresql-*.log`; 파일명은 배포 설정 확인 |
+| Redis | `/example/logs/redis/redis.log` | 단일 파일, 권한 제한 |
+| Kafka | `/example/logs/kafka/kafka.log` | 실행 스크립트 stdout/stderr |
+| Kafka 상세 | `/example/logs/kafka/detail/` | server/controller/state-change/log-cleaner/request/authorizer/GC 등 |
+| Kafka Consumer | `/example/logs/kafka/consumers/` | consumer.log, log.log, notification.log 및 회전 파일 |
+| Airflow 태스크 | `/example/logs/airflow/tasks/` | `dag_id=*/run_id=*/task_id=*/attempt=*.log`, 재귀 탐색 |
+| Airflow DAG Processor | `/example/logs/airflow/tasks/dag_processor/` | 날짜별 로그, 상위 Airflow 수집에 포함 |
+| Airflow Health | `/example/logs/airflow/health_check.log` | 단일 파일 |
+| Nginx Proxy Manager | `/example/logs/proxy/` | access/error/letsencrypt/default/fallback 및 회전 파일 |
+| RustFS | `/example/logs/object-storage/` | rustfs.log 및 날짜별 회전 파일 |
 
 ### 미확정/보조 로그
-- `/home/airflow/eft-library-airflow/scheduler.log`, `webserver.log`: 현재 Docker 운영 로그인지 확인 전에는 비활성.
+- `/example/logs/airflow/scheduler.log`, `webserver.log`: 현재 Docker 운영 로그인지 확인 전에는 비활성.
 - Docker stdout: npm, rustfs, Airflow apiserver/scheduler/dag-processor/triggerer. `json-file` 사용 확인. **`/var/lib/docker/containers` 직접 읽기보다 Docker SDK/CLI 사용**, 중복 수집 방지. 종료된 init 컨테이너는 기본 제외.
-- NPM 도메인 매핑:
-  - `back.eftlibrary.com`: `proxy-host-2_access.log`, `proxy-host-2_error.log`
-  - `image.eftlibrary.com`: `proxy-host-3_access.log`, `proxy-host-3_error.log`
-  - `eftlibrary.com`: `proxy-host-4_access.log`, `proxy-host-4_error.log`
-- Kafka `/home/kafka/kraft-combined-logs/`는 **KRaft 데이터 저장소**이므로 로그 수집 대상에서 제외.
+- NPM 도메인 매핑 예시:
+  - `api.example.com`: `proxy-host-<ID>_access.log`, `proxy-host-<ID>_error.log`
+  - `files.example.com`: `proxy-host-<ID>_access.log`, `proxy-host-<ID>_error.log`
+  - `example.com`: `proxy-host-<ID>_access.log`, `proxy-host-<ID>_error.log`
+- Kafka의 데이터 디렉터리는 **KRaft 데이터 저장소**이므로 로그 수집 대상에서 제외.
 
 ### PostgreSQL 연결 참고
-- 서비스: `postgresql-17.service`, 포트 **13245**.
-- Unix sockets: `/run/postgresql/.s.PGSQL.13245`, `/tmp/.s.PGSQL.13245`.
-- `data_directory=/var/lib/pgsql/17/data`, `logging_collector=on`, `log_destination=stderr`, `log_directory=log`, `log_filename=postgresql-%a.log`.
+- 서비스명·접속 포트·소켓 경로는 배포 환경에서 확인한다.
+- 로그 디렉터리와 파일명은 PostgreSQL의 로깅 설정에서 확인한다. Collector는 DB 접속 대신 로그 파일을 읽는다.
 - **DB 데이터 디렉터리 전체 권한을 Agent에 부여하지 않는다.** 로그 Collector에만 최소 읽기 권한을 부여하거나 별도 권한으로 수집한 결과를 전달한다. 권한 변경은 별도 승인 후 시행.
 
 ## 3. 설정 파일: `config/log_sources.yaml`
@@ -48,43 +48,43 @@ defaults:
 sources:
   nextjs:
     type: file
-    path: /home/frontend_a/eft-library-front/log.out
+    path: /example/logs/nextjs/log.out
   fastapi:
     type: file
-    path: /home/backend/eft-library-back/log.out
+    path: /example/logs/fastapi/log.out
   postgresql:
     type: directory
-    path: /var/lib/pgsql/17/data/log
+    path: /example/logs/postgresql
     pattern: 'postgresql-*.log'
   redis:
     type: file
-    path: /var/log/redis/redis.log
+    path: /example/logs/redis/redis.log
   kafka:
     type: file
-    path: /home/kafka/kafka_2.13-4.1.1/kafka.log
+    path: /example/logs/kafka/kafka.log
   kafka_detail:
     type: directory
-    path: /home/kafka/kafka_2.13-4.1.1/logs
+    path: /example/logs/kafka/detail
     pattern: '*.log'
   kafka_consumer:
     type: directory
-    path: /home/kafka/eft-library-kafka/logs
+    path: /example/logs/kafka/consumers
     pattern: '*.log'
   airflow:
     type: directory
-    path: /home/airflow/logs
+    path: /example/logs/airflow/tasks
     pattern: '*.log'
     recursive: true
   airflow_health:
     type: file
-    path: /home/airflow/latest_data/health_check.log
+    path: /example/logs/airflow/health_check.log
   npm:
     type: directory
-    path: /home/tool/npm/data/logs
+    path: /example/logs/proxy
     pattern: '*.log'
   rustfs:
     type: directory
-    path: /home/tool/rustfs/logs
+    path: /example/logs/object-storage
     pattern: '*.log'
 ```
 
@@ -110,7 +110,7 @@ sources:
   "source": "application",
   "level": "ERROR",
   "message": "Database connection timeout",
-  "file": "/home/backend/eft-library-back/log.out",
+  "file": "/example/logs/fastapi/log.out",
   "metadata": {"error_type": "DatabaseError"}
 }
 ```
@@ -126,7 +126,7 @@ sources:
 ## 6. 저장 및 실행
 - 원본은 기존 서비스 경로에서 유지; Collector는 원본을 변경하지 않는다.
 - 체크포인트는 초기 SQLite 또는 PostgreSQL 중 하나를 선택하고 근거를 기록. 초기 SQLite 사용 시 원자적 트랜잭션·백업·잠금 정책 명시.
-- 전처리 배치는 JSON/JSONL 파일로 설정 가능한 전용 데이터 경로에 저장한다. 로컬은 프로젝트의 Git 제외 데이터 디렉터리 또는 임시 디렉터리, 운영은 `/home/agent/` 아래 전용 경로를 사용하고, 분석 완료 후 보관/삭제 정책을 명시한다. Git 추적 금지.
+- 전처리 배치는 JSON/JSONL 파일로 설정 가능한 전용 데이터 경로에 저장한다. 로컬은 프로젝트의 Git 제외 데이터 디렉터리 또는 임시 디렉터리, 운영은 설정된 전용 데이터 경로를 사용하고, 분석 완료 후 보관/삭제 정책을 명시한다. Git 추적 금지.
 - AI 보고서는 Phase 3에서 PostgreSQL에 저장. 대량 원본 로그의 DB 무차별 적재 금지.
 - 배치 계약: 스키마 버전, batch ID, 시간 범위와 타임존, event/metric ID, 서비스별 집계·대표 로그·시스템 지표, 수집 성공/실패/누락 및 마스킹 상태를 명시한다. Phase 3과 동일한 스키마를 공유한다.
 - CLI 목표: `aiops collect --all`, `--service fastapi`, `--since 24h` (옵션 의미와 체크포인트 상호작용 정의).
@@ -160,4 +160,4 @@ sources:
 > Phase 2를 로컬에서 구현하라. 운영 경로와 fixture 설정을 분리하고 운영 접근 없이 수집·정제·배치 저장을 검증하라. 운영 배포용 경로를 설정에 반영하되, 권한이 없는 파일은 우회 접근하지 말고 실패로 기록하라. 먼저 Next.js/FastAPI/PostgreSQL에 대한 범용 Collector와 fixture 테스트를 완성하라. 서비스 설정이나 로그 파일을 변경하지 말고, 증분 수집·회전·체크포인트·마스킹을 검증한 후 나머지 소스로 확장하라.
 
 ## 11. 로컬 구현 결과
-Phase 2의 로컬 구현과 fixture 검증을 완료했다. 실제 명령·옵션·SQLite 저장/복구·제한·Airflow 연결 설계는 [COLLECTION.md](COLLECTION.md), 검증 결과와 운영 확인 대기 항목은 [PHASE2_VALIDATION.md](PHASE2_VALIDATION.md), 실제 배치 계약은 [BATCH_CONTRACT.md](BATCH_CONTRACT.md)를 따른다. 현재 사용자 운영 조건인 root 실행을 지원하며 계정 전환이나 권한 변경을 선행 조건으로 삼지 않는다.
+Phase 2의 로컬 구현과 fixture 검증을 완료했다. 실제 명령·옵션·SQLite 저장/복구·제한·Airflow 연결 설계는 [COLLECTION.md](COLLECTION.md), 검증 결과와 운영 확인 대기 항목은 [PHASE2_VALIDATION.md](PHASE2_VALIDATION.md), 실제 배치 계약은 [BATCH_CONTRACT.md](BATCH_CONTRACT.md)를 따른다. 실행 계정은 설정된 로그를 읽고 Codex 인증을 사용할 수 있어야 한다.

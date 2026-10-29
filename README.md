@@ -1,8 +1,10 @@
 # eft-library-aiops
 
-EFT Library의 로그와 서버 상태를 수집하고 Codex로 장애 원인과 개선 방향을 분석하는 Python 도구입니다. 현재 **Phase 1의 Codex 분석 연결과 Phase 2의 로그·시스템 상태 수집**을 구현했습니다. 일일·주간·월간 입력 통합과 버전별 보고서 저장도 지원합니다. 일일 점검은 종합 요약에 장애 분석·성능 분석을 함께 포함하며, 근거가 부족한 항목은 정상 판정 대신 판단 근거 부족으로 표시합니다. PostgreSQL 보고서 저장·작업 큐·단일 Worker도 지원합니다. 외부 Airflow 프로젝트에서 호출할 HTTP API와 4003 포트의 조회 전용 웹도 제공합니다.
+문서의 `<...>` 값과 `/example/` 경로는 예시입니다. 복사해서 실행하기 전에 실제 배포 환경의 값으로 바꾸세요.
 
-향후 AIOps 웹 서비스의 기본 포트는 **백엔드(FastAPI) 9023**, **조회 웹 4003**으로 사용합니다. `aiops serve`는 백엔드 9023 포트를 사용하며 CLI 수집·분석은 포트를 열지 않습니다.
+EFT Library의 로그와 서버 상태를 수집하고 Codex로 장애 원인과 개선 방향을 분석하는 Python 도구입니다. 현재 **Phase 1의 Codex 분석 연결과 Phase 2의 로그·시스템 상태 수집**을 구현했습니다. 일일·주간·월간 입력 통합과 버전별 보고서 저장도 지원합니다. 일일 점검은 종합 요약에 장애 분석·성능 분석을 함께 포함하며, 근거가 부족한 항목은 정상 판정 대신 판단 근거 부족으로 표시합니다. PostgreSQL 보고서 저장·작업 큐·단일 Worker도 지원합니다. 외부 Airflow 프로젝트에서 호출할 HTTP API와 조회 전용 웹도 제공합니다.
+
+API·웹의 주소와 포트는 배포 환경의 `AIOPS_API_HOST`, `AIOPS_API_PORT`, `AIOPS_WEB_HOST`, `AIOPS_WEB_PORT` 설정으로 관리합니다. CLI 수집·분석은 포트를 열지 않습니다.
 
 ## 준비
 
@@ -25,7 +27,7 @@ uv sync --locked
 
 ### 운영 실행 흐름
 
-운영 기준은 **Docker Airflow → 호스트 AIOps API(9023)**입니다. Airflow에 프로젝트·로그·Codex 인증 볼륨을 공유하지 않습니다. Worker는 API 호출 시 한 건씩 실행합니다.
+운영 기준은 **Docker Airflow → 호스트 AIOps API**입니다. Airflow에 프로젝트·로그·Codex 인증 볼륨을 공유하지 않습니다. Worker는 API 호출 시 한 건씩 실행합니다.
 
 `.env`에 기존 DB 설정과 아래 값을 지정합니다.
 
@@ -50,17 +52,17 @@ AIOPS_API_TOKEN=직접_생성한_비밀키
 
 `POST /v1/worker/run-once/stream`은 Codex의 공개 메시지·실행 이벤트·제공된 토큰 사용량과 최종 작업 상태를 SSE로 전달합니다. 기존 JSON Worker API도 유지합니다. 진행 로그를 보려면 별도 Airflow 프로젝트에서 스트리밍 호출과 `log.info()` 수신을 연결해야 합니다. 추가 Codex 호출이나 DB 마이그레이션은 없습니다. [스트리밍 수신 계약과 예시](docs/WORKER_STREAM.md)를 참고하세요.
 
-### 조회 전용 웹 (4003)
+### 조회 전용 웹
 
 대시보드, 일일·주간·월간 보고서 목록과 상세, 수집 현황, 분석 작업 현황을 제공합니다. 기간·위험도·분석 상태로 조회하고 이전 수정본도 확인할 수 있습니다. 실행·재시도·설정 변경 기능은 없습니다.
 
 최신 코드를 반영한 뒤 다음으로 API와 웹을 실행합니다. 기존 DB는 그대로 사용하며 추가 마이그레이션이나 Node/npm 설치는 필요 없습니다.
 
 ```sh
-./restart.sh          # API :9023 + 조회 웹 :4003 함께 재시작
+./restart.sh          # API + 조회 웹 함께 재시작
 ```
 
-브라우저에서 `http://운영서버주소:4003`으로 접속합니다. 웹 서버는 기본 `http://127.0.0.1:9023`의 API를 조회하며 기존 .env의 AIOPS_API_TOKEN을 서버에서만 사용합니다. API 주소가 다르면 AIOPS_WEB_API_URL을 지정합니다.
+브라우저에서 `http://<WEB_HOST>:<WEB_PORT>`으로 접속합니다. 웹 서버는 설정된 API를 조회하며 기존 .env의 AIOPS_API_TOKEN을 서버에서만 사용합니다. API 주소가 다르면 AIOPS_WEB_API_URL을 지정합니다.
 
 `./scripts/restart-web.sh status`로 실행 상태를 확인하고 `./scripts/restart-web.sh stop`으로 종료합니다. 웹 로그는 한국 시간 날짜별 `log_history/web-YYYY-MM-DD.log`에 저장합니다. API와 웹은 각각 별도 프로세스이며 웹을 종료해도 Airflow/API 작업에는 영향을 주지 않습니다. 자세한 구성은 [WEB.md](docs/WEB.md)를 참고하세요.
 
@@ -128,7 +130,7 @@ uv run aiops collect --config config/log_sources.yaml --all
 uv run aiops --env-file .env collect --config config/log_sources.yaml --all
 ```
 
-운영 경로는 `config/log_sources.yaml`에서 확인·수정합니다. 현재 root 실행 환경을 지원하며, 원본 로그나 서비스 설정은 변경하지 않습니다. Docker 지표 수집은 기본 비활성입니다.
+운영 경로는 `config/log_sources.yaml`에서 확인·수정합니다. 설정된 실행 계정을 사용하며, 원본 로그나 서비스 설정은 변경하지 않습니다. Docker 지표 수집은 기본 비활성입니다.
 
 첫 실행은 파일별 최근 일부만 읽고, 다음 실행은 새로 추가된 부분만 읽습니다. 새 로그가 없으면 `events: 0`도 정상입니다. 출력의 `snapshot`은 요약 JSON, `events_file`은 마스킹한 정규화 이벤트 파일입니다. 기본 저장 경로는 `aiops_data/collection/`이고 체크포인트는 별도 SQLite에 저장합니다.
 
@@ -181,7 +183,7 @@ PostgreSQL 테이블은 **public 스키마의 aiops_ 접두사**를 사용합니
 
 ```dotenv
 # .env에 추가. 실제 DB 비밀번호를 사용하고 이 파일은 Git에 넣지 않습니다.
-AIOPS_DATABASE_URL="host=127.0.0.1 port=13245 dbname=aiops user=aiops_app"
+AIOPS_DATABASE_URL="host=<DB_HOST> port=<DB_PORT> dbname=<DB_NAME> user=<DB_USER>"
 PGPASSWORD="DB_비밀번호"
 AIOPS_SOURCES_CONFIG=config/log_sources.yaml
 ```

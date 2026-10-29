@@ -1,9 +1,9 @@
 # Docker Airflow → AIOps HTTP API
 
-운영 기준은 **Airflow 3.1.5(Docker) → 호스트의 AIOps API(9023)**다. Airflow 컨테이너에는 프로젝트·로그·Codex 인증을 마운트하지 않는다. AIOps는 기존 root 계정으로 호스트에서 실행하며 같은 aiops_data와 public.aiops_*를 사용한다. 스키마 변경은 없다.
+운영 기준은 **Airflow 3.1.5(Docker) → 호스트의 AIOps API**다. Airflow 컨테이너에는 프로젝트·로그·Codex 인증을 마운트하지 않는다. AIOps는 Codex 인증이 준비된 계정으로 호스트에서 실행하며 같은 aiops_data와 public.aiops_*를 사용한다. 스키마 변경은 없다.
 
 ```text
-Docker Airflow ── HTTP + API key ──> 호스트 AIOps :9023
+Docker Airflow ── HTTP + API key ──> 호스트 AIOps API
                                       ├─ 수집 → 파일 + DB 배치 정보
                                       ├─ 보고서 요청 → PostgreSQL 큐
                                       └─ Worker 1회 호출 → Codex → DB 결과
@@ -28,13 +28,13 @@ API 시작:
 ./restart.sh
 ```
 
-기본 포트는 9023이다. `./restart.sh`는 의존성 반영 후 API와 조회 웹을 순서대로 재시작한다. API는 인증된 상태 조회에서 DB 연결까지 확인한다. API만 재시작하려면 `./scripts/restart-api.sh`를 사용한다. 로그는 한국 시간 기준 log_history/api-YYYY-MM-DD.log에 날짜별로 저장된다. 실행 중 자정이 지나면 다음 로그부터 새 날짜 파일에 기록하며 같은 날 재시작은 이어서 기록한다. log_history/는 Git에서 제외한다. `./restart.sh status`는 API·웹 전체 상태 확인, `./restart.sh stop`은 전체 종료다. PID와 잠금은 AIOPS_DATA_DIR/run에 저장한다. .env의 AIOPS_API_HOST/AIOPS_API_PORT로 주소와 포트를 변경할 수 있다(기본 0.0.0.0:9023).
+API 주소와 포트는 배포 환경 설정을 따른다. `./restart.sh`는 의존성 반영 후 API와 조회 웹을 순서대로 재시작한다. API는 인증된 상태 조회에서 DB 연결까지 확인한다. API만 재시작하려면 `./scripts/restart-api.sh`를 사용한다. 로그는 한국 시간 기준 log_history/api-YYYY-MM-DD.log에 날짜별로 저장된다. 실행 중 자정이 지나면 다음 로그부터 새 날짜 파일에 기록하며 같은 날 재시작은 이어서 기록한다. log_history/는 Git에서 제외한다. `./restart.sh status`는 API·웹 전체 상태 확인, `./restart.sh stop`은 전체 종료다. PID와 잠금은 AIOPS_DATA_DIR/run에 저장한다. .env의 AIOPS_API_HOST/AIOPS_API_PORT로 주소와 포트를 변경할 수 있다.
 
 수동 실행한 API나 다른 프로세스는 임의로 종료하지 않는다. 기존 요청이 30초 안에 끝나지 않으면 강제 종료 없이 재시작을 중단한다. 시스템 재부팅 후 자동 시작이나 장애 시 자동 재시작 기능은 포함하지 않는다.
 
 ## 외부 호출 프로젝트와의 경계
 
-Airflow DAG·Connection·Docker 네트워크·스케줄은 별도 Airflow 프로젝트에서 관리한다. 이 저장소에는 AIOps API 서버와 호출 계약만 둔다. 외부 호출자는 호스트의 9023 포트에 접근 가능한 주소와 `X-AIOps-Key` 인증값을 설정하면 된다. 프로젝트·로그·Codex 인증 볼륨 공유는 필요 없다.
+Airflow DAG·Connection·Docker 네트워크·스케줄은 별도 Airflow 프로젝트에서 관리한다. 이 저장소에는 AIOps API 서버와 호출 계약만 둔다. 외부 호출자는 호스트 AIOps API에 접근 가능한 주소와 `X-AIOps-Key` 인증값을 설정하면 된다. 프로젝트·로그·Codex 인증 볼륨 공유는 필요 없다.
 
 일일 기본 대상은 한국 시간 기준 전날, 주간은 지난주, 월간은 지난달이다. 재실행 시 같은 기간을 유지하려면 date를 명시한다. daily는 해당 날짜, weekly는 해당 날짜가 속한 주, monthly는 해당 날짜가 속한 달이다. 마감되지 않은 기간은 거부된다.
 
@@ -89,7 +89,7 @@ API 재시작 후에도 작업 큐·분석 결과는 DB에 남는다. 중단된 
 
 ## 조회 웹
 
-조회 전용 웹은 별도 4003 포트에서 실행한다. `./scripts/restart-web.sh`로 시작하며 기존 API와 같은 DB를 API를 통해 조회한다. 브라우저에는 API 키를 전달하지 않고 웹 서버가 GET 허용 목록으로만 대리 조회한다. [WEB.md](WEB.md)를 참고한다.
+조회 전용 웹은 별도 웹 프로세스로 실행한다. `./scripts/restart-web.sh`로 시작하며 기존 API와 같은 DB를 API를 통해 조회한다. 브라우저에는 API 키를 전달하지 않고 웹 서버가 GET 허용 목록으로만 대리 조회한다. [WEB.md](WEB.md)를 참고한다.
 
 ## 일일 점검 확장
 
