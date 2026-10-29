@@ -1,16 +1,117 @@
-# eft-library-aiops
+# 타르코프 도서관 · AIOps
 
-문서의 `<...>` 값과 `/example/` 경로는 예시입니다. 복사해서 실행하기 전에 실제 배포 환경의 값으로 바꾸세요.
+**갱신일: 2026.10.29**
 
-EFT Library의 로그와 서버 상태를 수집하고 Codex로 장애 원인과 개선 방향을 분석하는 Python 도구입니다. 현재 **Phase 1의 Codex 분석 연결과 Phase 2의 로그·시스템 상태 수집**을 구현했습니다. 일일·주간·월간 입력 통합과 버전별 보고서 저장도 지원합니다. 일일 점검은 종합 요약에 장애 분석·성능 분석을 함께 포함하며, 근거가 부족한 항목은 정상 판정 대신 판단 근거 부족으로 표시합니다. PostgreSQL 보고서 저장·작업 큐·단일 Worker도 지원합니다. 외부 Airflow 프로젝트에서 호출할 HTTP API와 조회 전용 웹도 제공합니다.
+타르코프 도서관의 **서비스 로그와 시스템 지표를 수집하고, Codex로 운영 보고서를 만드는 프로젝트**입니다. 일일 점검에 장애·성능 분석을 함께 담고, 일일 결과를 모아 주간·월간 보고서를 생성합니다.
 
-API·웹의 주소와 포트는 배포 환경의 `AIOPS_API_HOST`, `AIOPS_API_PORT`, `AIOPS_WEB_HOST`, `AIOPS_WEB_PORT` 설정으로 관리합니다. CLI 수집·분석은 포트를 열지 않습니다.
+Airflow가 정해진 시간에 HTTP API를 호출하고, 운영자는 조회 전용 웹에서 보고서와 수집·작업 상태를 확인합니다. 원본 로그나 서비스 설정을 변경하지 않으며, 분석 결과에 따른 자동 복구·배포는 수행하지 않습니다.
 
-## 준비
+## 전체 서비스에서 맡은 역할
 
-- Python 3.12 이상, `uv`, macOS 또는 Linux (POSIX 프로세스 그룹·파일 잠금 사용)
-- Codex CLI: 로컬 검증 버전 `0.165.0`. 배포 시 검증한 버전을 고정하는 것을 권장합니다.
-- CLI를 실행하는 동일 계정의 Codex 로그인
+Airflow는 게임 데이터 갱신과 정기 작업을, FastAPI·Next.js는 사용자 기능과 화면을 담당합니다. 이 프로젝트는 각 서비스가 남긴 기록을 읽고 운영 상태를 분석합니다.
+
+```mermaid
+flowchart LR
+    Services[서비스 로그 · 시스템 지표] -->|증분 수집| Collector[AIOps Collector]
+    Airflow[Airflow] -->|HTTP 요청| API[AIOps API]
+    API --> Collector
+    Collector --> Files[(수집 배치 · 체크포인트)]
+    Files -->|기간별 입력| Worker[단일 Worker]
+    API -->|작업 접수 · Worker 실행| Worker
+    Worker --> Codex[Codex CLI]
+    Codex -->|분석 결과| Worker
+    Worker --> DB[(PostgreSQL 보고서 · 작업 이력)]
+    DB -->|조회| API
+    Web[조회 전용 웹] -->|GET 요청| API
+    Operator[운영자] --> Web
+```
+
+AIOps는 로그와 Codex 인증을 사용할 수 있는 호스트에서 실행합니다. Docker의 Airflow는 API로 요청하므로 프로젝트·원본 로그·인증 파일을 컨테이너에 공유할 필요가 없습니다. DAG와 스케줄은 별도 Airflow 프로젝트에서 관리합니다.
+
+## 제공하는 기능
+
+| 영역          | 하는 일                                                                | 주요 코드                                     |
+| ------------- | ---------------------------------------------------------------------- | --------------------------------------------- |
+| 로그 수집     | 파일의 새로 추가된 부분 읽기, 회전·중단 복구, 서비스별 수집 한도 배분  | `src/aiops/collectors/files.py`, `store.py`   |
+| 정규화·마스킹 | 시각·수준·서비스 정규화, 다중행 결합, 민감정보 마스킹, 오류·HTTP 집계  | `src/aiops/collectors/parse.py`, `redact.py`  |
+| 시스템 지표   | CPU·메모리·디스크와 선택한 Docker 컨테이너 상태·자원 조회              | `src/aiops/collectors/system.py`, `docker.py` |
+| 정기 보고서   | 한국 시간 기준 기간 입력, 누락 표시, 수정본·하위 보고서 의존 관계 관리 | `src/aiops/reporting/`                        |
+| AI 분석       | 기존 Codex 로그인 재사용, 구조화된 결과와 근거 검증                    | `src/aiops/providers/`                        |
+| 작업 처리     | PostgreSQL 작업 큐, 단일 Worker 잠금, 실패 분류와 재시도               | `src/aiops/worker.py`, `storage/`             |
+| HTTP API      | 수집·보고서 접수·Worker 실행, 공개 진행 메시지 SSE 전송                | `src/aiops/api.py`, `streaming.py`            |
+| 조회 웹       | 보고서 목록·상세, 수집 범위, 작업 상태와 최근 추이                     | `src/aiops/web/`, `web_server.py`             |
+
+Docker 수집은 컨테이너 상태와 자원 지표를 조회합니다. 컨테이너 stdout·stderr 로그를 직접 가져오는 기능은 현재 포함하지 않습니다.
+
+## 수집부터 보고서 조회까지
+
+### 수집과 분석은 따로 실행합니다
+
+`collect`는 Codex를 실행하지 않습니다. 파일별 체크포인트 이후의 로그를 읽어 정규화·마스킹한 배치와 지표를 저장합니다. 첫 실행은 최근 일부만 읽으며, 다음 실행부터 이어서 수집합니다.
+
+분석할 때는 저장한 데이터를 기간별로 묶어 Codex에 전달합니다. 원문에 시각이 없는 기록은 임의로 시간을 붙이지 않고, 수집 누락과 함께 보고서의 한계로 표시합니다. 수집 성공·분석 완료·수집 범위 충족은 각각 별도로 판단합니다.
+
+### 일일 결과를 주간·월간으로 모읍니다
+
+| 보고서 | 기본 분석 대상                   | 기준                                         |
+| ------ | -------------------------------- | -------------------------------------------- |
+| 일일   | 전날 로그와 시스템 지표          | 종합 요약·장애 분석·성능 분석                |
+| 주간   | 지난 월요일~일요일의 일일 보고서 | 반복 문제·변화 통합                          |
+| 월간   | 지난달 일일 보고서 전체          | 주간 보고서는 보조 참고, 건수 중복 합산 방지 |
+
+기간은 한국 시간의 달력 날짜로 계산합니다. 지연 로그나 하위 보고서가 바뀌면 새 수정본을 만들고, 같은 입력의 완료 결과는 재사용합니다. 근거가 부족하면 정상으로 단정하지 않고 `INSUFFICIENT_DATA`로 표시합니다.
+
+### Airflow가 접수하고 Worker가 처리합니다
+
+PostgreSQL을 설정한 운영 환경에서는 보고서 요청이 작업 큐에 등록됩니다. Airflow가 Worker API를 호출하면 한 건을 처리하고 종료하므로 별도 상시 Worker 서비스가 필요하지 않습니다.
+
+SSE API는 Codex가 공개적으로 출력하는 진행 메시지·실행 이벤트·토큰 사용량과 최종 작업 상태를 전달합니다. Airflow에서 이를 받아 로그에 기록할 수 있습니다. 내부 추론 본문·도구 인수·출력은 전달하지 않습니다.
+
+조회 웹은 보고서·수집·작업 현황을 보여줍니다. API 키는 웹 서버에서만 사용하며 브라우저에 전달하지 않습니다. 실행·재시도·설정 변경 버튼은 제공하지 않습니다.
+
+## 주요 기술
+
+의존성 선언은 [pyproject.toml](pyproject.toml), 설치 버전은 [uv.lock](uv.lock)을 기준으로 합니다.
+
+| 기술                    | 용도                                   |
+| ----------------------- | -------------------------------------- |
+| Python 3.12+ · uv       | CLI·서버 실행, 의존성 관리             |
+| FastAPI · Uvicorn       | HTTP API와 조회 웹 서버                |
+| Codex CLI               | 기존 로그인 기반 운영 분석             |
+| PostgreSQL · Psycopg    | 보고서 원본, 작업 큐와 시도 이력       |
+| SQLite                  | 수집 체크포인트와 로컬 보고서 카탈로그 |
+| Pydantic · PyYAML       | 입력·출력 검증과 수집 설정             |
+| psutil · Docker SDK     | 호스트·컨테이너 상태 조회              |
+| HTML · CSS · JavaScript | 별도 Node 빌드가 없는 조회 전용 웹     |
+
+## 디렉터리 구조
+
+```text
+.
+├── src/aiops/
+│   ├── collectors/         # 증분 수집, 파서, 마스킹, 지표
+│   ├── providers/          # Codex 실행과 공개 진행 이벤트
+│   ├── reporting/          # 기간 입력, 집계, 버전과 의존 관계
+│   ├── storage/            # PostgreSQL·SQLite 저장소와 SQL
+│   ├── web/                # 조회 웹 HTML·CSS·JavaScript
+│   ├── api.py              # 수집·보고서·Worker HTTP API
+│   ├── web_server.py       # 웹 제공과 GET 조회 프록시
+│   ├── worker.py           # 단일 작업 처리
+│   └── cli.py              # aiops 명령
+├── config/                 # 수집 설정과 샘플 입력
+├── prompts/                # 분석 지침
+├── scripts/                # 최초 준비와 개별 서버 관리
+├── deploy/                 # DB 준비 SQL, 선택적 Worker 서비스 예제
+├── tests/                  # 대역 기반 테스트와 선택적 통합 검증
+├── docs/                   # 기능 계약·운영 절차·검증 기록
+├── aiops_data/             # 수집 배치·체크포인트·보고서, Git 제외
+├── log_history/            # API·웹 날짜별 실행 로그, Git 제외
+└── restart.sh              # API·웹 통합 시작·재시작·상태·종료
+```
+
+## 실행 환경과 설정
+
+macOS 또는 Linux에서 Python 3.12 이상과 `uv`를 사용합니다. 파일 잠금과 POSIX 프로세스 그룹을 사용합니다. Codex를 실행할 계정으로 CLI 설치와 로그인을 먼저 확인합니다.
 
 ```sh
 npm install -g @openai/codex@latest
@@ -19,217 +120,110 @@ codex login status
 uv sync --locked
 ```
 
-기존 `.venv`를 사용합니다. `uv`가 필요한 의존성을 동기화합니다.
+명령은 프로젝트 루트에서 실행합니다. `uv run`은 프로젝트 가상환경을 사용하므로 별도 활성화가 필요하지 않습니다.
 
-## 실행
-
-모든 명령은 프로젝트 최상위 폴더(`eft-library-aiops/`)에서 실행합니다. `uv run`을 사용하므로 가상환경을 따로 활성화할 필요는 없습니다.
-
-### 운영 실행 흐름
-
-운영 기준은 **Docker Airflow → 호스트 AIOps API**입니다. Airflow에 프로젝트·로그·Codex 인증 볼륨을 공유하지 않습니다. Worker는 API 호출 시 한 건씩 실행합니다.
-
-`.env`에 기존 DB 설정과 아래 값을 지정합니다.
+기존 `.env`가 없다면 [.env.example](.env.example)을 참고해 작성합니다. 아래 `<...>`는 예시 자리 표시자이며 실제 값으로 바꿔야 합니다. 운영 주소·포트·계정·비밀값은 문서에 기록하지 않습니다.
 
 ```dotenv
+AIOPS_DATABASE_URL="host=<DB_HOST> port=<DB_PORT> dbname=<DB_NAME> user=<DB_USER>"
+PGPASSWORD="<DB_PASSWORD>"
 AIOPS_SOURCES_CONFIG=config/log_sources.yaml
-AIOPS_API_TOKEN=직접_생성한_비밀키
+AIOPS_API_TOKEN=<GENERATED_SECRET>
 ```
 
+| 설정                                              | 용도                                          |
+| ------------------------------------------------- | --------------------------------------------- |
+| `AIOPS_DATABASE_URL` · `PGPASSWORD`               | 보고서·작업 큐 DB 접속                        |
+| `AIOPS_SOURCES_CONFIG`                            | 수집 대상과 파일 경로 설정                    |
+| `AIOPS_DATA_DIR`                                  | 모든 실행에서 공유할 데이터 디렉터리          |
+| `AIOPS_API_TOKEN`                                 | Airflow·웹 서버가 API 호출 시 사용하는 비밀키 |
+| `AIOPS_API_HOST` · `AIOPS_API_PORT`               | API 수신 주소와 포트                          |
+| `AIOPS_WEB_HOST` · `AIOPS_WEB_PORT`               | 조회 웹 수신 주소와 포트                      |
+| `AIOPS_WEB_API_URL`                               | 웹 서버가 조회하는 API 주소                   |
+| `AIOPS_CODEX_BIN` · `AIOPS_MODEL`                 | Codex 실행 파일과 요청 모델                   |
+| `AIOPS_TIMEOUT_SECONDS` · `AIOPS_MAX_INPUT_BYTES` | 분석 시간과 입력 크기 한도                    |
+
+CLI는 `--env-file .env`를 지정할 때 파일을 읽으며 기존 환경변수가 우선합니다. 관리 스크립트는 `.env`를 사용합니다. 모델을 지정하지 않으면 CLI 기본 모델을 사용하고 실제 모델명을 추정해 기록하지 않습니다. 인증과 실행 방식은 [Provider 안내](docs/CODEX_PROVIDER.md)를 참고하세요.
+
+## 운영 실행과 확인
+
+전용 DB와 접속 계정, 수집 설정을 준비한 뒤 다음 두 단계로 시작합니다.
+
 ```sh
-# 최초 준비: 테이블 초기화, 기존 보고서·배치 등록, DB 연결 확인
+# 최초 준비: 테이블 초기화·기존 보고서 이전·배치 등록·DB 확인
 ./scripts/init.sh
 
-# API와 조회 웹을 백그라운드에서 함께 시작/재시작합니다.
+# API와 조회 웹을 함께 시작·재시작
 ./restart.sh
 ```
 
-이후에는 Airflow가 수집·보고서 접수·Worker 실행을 HTTP로 호출합니다. **[API 호출 안내](docs/AIRFLOW_API.md)**를 참고하세요. 별도 상시 Worker 서비스는 필요하지 않습니다. Airflow DAG와 스케줄은 별도 프로젝트에서 관리합니다.
+테이블은 `public` 스키마의 `aiops_` 접두사를 사용합니다. DB 준비 절차는 [PostgreSQL·Worker 안내](docs/POSTGRES_WORKER.md)를 따릅니다. 스키마 적용은 초기화 명령에서 수행하며 일반 조회가 자동 마이그레이션을 실행하지 않습니다.
 
-수동 진단은 `collect --all`, `report run --type daily`, `worker --once`, `status`로 할 수 있습니다. 수집은 DB 등록까지 자동 처리하고, report run은 입력 준비·큐 등록을 통합합니다. DB 없는 로컬 모드에서는 report run이 직접 Codex를 호출합니다. `db`, `jobs`, `report prepare`는 관리·복구용입니다.
-
-### Airflow에서 실시간 진행 로그 보기
-
-`POST /v1/worker/run-once/stream`은 Codex의 공개 메시지·실행 이벤트·제공된 토큰 사용량과 최종 작업 상태를 SSE로 전달합니다. 기존 JSON Worker API도 유지합니다. 진행 로그를 보려면 별도 Airflow 프로젝트에서 스트리밍 호출과 `log.info()` 수신을 연결해야 합니다. 추가 Codex 호출이나 DB 마이그레이션은 없습니다. [스트리밍 수신 계약과 예시](docs/WORKER_STREAM.md)를 참고하세요.
-
-### 조회 전용 웹
-
-대시보드, 일일·주간·월간 보고서 목록과 상세, 수집 현황, 분석 작업 현황을 제공합니다. 기간·위험도·분석 상태로 조회하고 이전 수정본도 확인할 수 있습니다. 실행·재시도·설정 변경 기능은 없습니다.
-
-최신 코드를 반영한 뒤 다음으로 API와 웹을 실행합니다. 기존 DB는 그대로 사용하며 추가 마이그레이션이나 Node/npm 설치는 필요 없습니다.
+이후 Airflow에서 **수집 → 보고서 접수 → Worker 실행 → 작업 완료 확인**을 연결합니다. 수집은 분석과 별도 주기로 실행합니다. [API 호출 안내](docs/AIRFLOW_API.md)와 [진행 로그 수신 예시](docs/WORKER_STREAM.md)를 참고하세요.
 
 ```sh
-./restart.sh          # API + 조회 웹 함께 재시작
-```
+./restart.sh status       # API·웹 상태
+./restart.sh stop         # API·웹 종료
 
-브라우저에서 `http://<WEB_HOST>:<WEB_PORT>`으로 접속합니다. 웹 서버는 설정된 API를 조회하며 기존 .env의 AIOPS_API_TOKEN을 서버에서만 사용합니다. API 주소가 다르면 AIOPS_WEB_API_URL을 지정합니다.
-
-`./scripts/restart-web.sh status`로 실행 상태를 확인하고 `./scripts/restart-web.sh stop`으로 종료합니다. 웹 로그는 한국 시간 날짜별 `log_history/web-YYYY-MM-DD.log`에 저장합니다. API와 웹은 각각 별도 프로세스이며 웹을 종료해도 Airflow/API 작업에는 영향을 주지 않습니다. 자세한 구성은 [WEB.md](docs/WEB.md)를 참고하세요.
-
-### .env를 사용하는 경우 (선택)
-
-기본 설정으로 실행할 때는 `.env`가 없거나 비어 있어도 됩니다. ChatGPT 로그인은 기존 Codex 인증을 사용하므로 API 키나 토큰을 `.env`에 넣을 필요가 없습니다.
-
-설정은 환경변수로 지정하며 `.env`는 자동으로 읽지 않습니다. 설정을 변경하려면 `.env.example`을 참고해 `.env`를 작성하고, 아래 명령을 순서대로 실행합니다. 기존 `.env`가 있다면 덮어쓰지 말고 필요한 값만 추가합니다.
-
-```sh
+# 수동 진단
 uv run aiops --env-file .env doctor
-uv run aiops --env-file .env analyze --input config/sample.json
-```
-
-기존 환경변수가 dotenv 파일보다 우선합니다.
-
-| 변수                    | 기본값   | 용도                                            |
-| ----------------------- | -------- | ----------------------------------------------- |
-| `AIOPS_CODEX_BIN`       | `codex`  | 기존 Codex 실행 파일 또는 절대 경로             |
-| `AIOPS_DATA_DIR`        | `aiops_data` | 잠금과 실행 메타데이터 저장 경로                |
-| `AIOPS_TIMEOUT_SECONDS` | `600`    | Codex 실행 타임아웃(초)                         |
-| `AIOPS_MAX_INPUT_BYTES` | `100000` | JSON 입력 최대 바이트                           |
-| `AIOPS_MODEL`           | 미지정   | 계정에서 사용 가능한 모델; 미지정 시 CLI 기본값 |
-
-Codex 사용자 설정과 프로젝트 규칙 파일은 불러오지 않습니다. 따라서 사용자 `config.toml`에 설정한 모델·MCP·사용자 정의 Provider는 사용하지 않습니다. 모델은 필요하면 위 변수로 지정합니다. 기존 ChatGPT 로그인은 재사용하며 API 키 환경변수는 자식 프로세스에 전달하지 않습니다. 기존 CLI가 API 키 방식으로 로그인되어 있다면 그 인증이 사용되므로 `codex login status`로 확인하세요.
-
-ChatGPT 인증은 플랜의 사용량 제한을 따릅니다. API 키 로그인은 별도 API 과금 대상입니다. 계정별 한도는 고정하지 않습니다. 자세한 근거는 [Provider 결정 문서](docs/CODEX_PROVIDER.md)를 참고하세요.
-
-### 기존 숨김 데이터 폴더 이전
-
-기본 데이터 폴더는 일반 `ls`에도 표시되는 `aiops_data/`입니다. 기존 서버에서 `.aiops/`를 사용했다면 AIOps 실행을 멈춘 상태에서, `aiops_data/`가 아직 없을 때 폴더 전체를 옮깁니다.
-
-```sh
-mv .aiops aiops_data
-```
-
-`.env`에 기존 경로를 설정했다면 `AIOPS_DATA_DIR=aiops_data`로 변경합니다. 폴더 전체를 옮겨야 SQLite 체크포인트와 기존 배치를 유지하며 이어 수집할 수 있습니다. 두 폴더가 이미 모두 있다면 덮어쓰거나 임의로 합치지 않습니다. 기존 `.aiops/`와 새 `aiops_data/`는 모두 Git 제외 대상입니다.
-
-### 데이터 접근 권한
-
-`aiops_data/`에 생성하는 폴더는 **755**, 일반 데이터 파일은 **644**로 설정합니다. 같은 서버의 다른 계정에서도 읽을 수 있으며 데이터 파일에는 실행 권한을 주지 않습니다. 기존 서버 파일은 AIOps 작업을 멈춘 상태에서 한 번 적용합니다.
-
-```sh
-find aiops_data -type d -exec chmod 755 {} +
-find aiops_data -type f -exec chmod 644 {} +
-```
-
-Codex 인증 저장소나 `.env`의 권한은 변경하지 않습니다.
-
-## 로그 수집 (Phase 2)
-
-**`collect`는 Codex를 실행하지 않습니다.** 로그 읽기·정규화·마스킹·오류 집계·시스템 지표 수집 후 재사용 가능한 배치를 저장합니다. PostgreSQL 접속 설정도 필요하지 않습니다.
-
-```sh
-# 기본 설정: 로컬 테스트용 로그로 먼저 확인
-uv run aiops collect --all
-
-# 운영 서버: 실제 FastAPI 로그부터 확인
-uv run aiops collect --config config/log_sources.yaml --service fastapi
-
-# 운영 서버: 설정된 모든 서비스 수집
-uv run aiops collect --config config/log_sources.yaml --all
-
-# .env 설정을 사용할 경우
-uv run aiops --env-file .env collect --config config/log_sources.yaml --all
-```
-
-운영 경로는 `config/log_sources.yaml`에서 확인·수정합니다. 설정된 실행 계정을 사용하며, 원본 로그나 서비스 설정은 변경하지 않습니다. Docker 지표 수집은 기본 비활성입니다.
-
-첫 실행은 파일별 최근 일부만 읽고, 다음 실행은 새로 추가된 부분만 읽습니다. 새 로그가 없으면 `events: 0`도 정상입니다. 출력의 `snapshot`은 요약 JSON, `events_file`은 마스킹한 정규화 이벤트 파일입니다. 기본 저장 경로는 `aiops_data/collection/`이고 체크포인트는 별도 SQLite에 저장합니다.
-
-수집 한도는 서비스·파일 사이에 배분하며 시작 서비스와 디렉터리 탐색 위치를 저장해 다음 실행에 이어갑니다.
-
-`status: partial`과 종료 코드 **10**은 일부 소스 실패·한도 도달·미완성 줄 보류가 있으나 배치는 저장했다는 의미입니다. `coverage`와 저장된 스냅샷의 `collection_failures`를 확인하세요. 새 경고 `scan_entry_limit`과 `scan_timeout`은 탐색 개수/시간을 구분합니다. `timestamp_absent`는 원문에 시각이 없는 로그이며, 이를 수집 시각으로 대체하지 않습니다.
-
-수집만 할 때는 여기까지 실행합니다. 아래 `analyze`는 단일 배치 점검용입니다. 정기 보고서는 다음 절의 `report` 명령으로 날짜별로 묶어 분석합니다.
-
-```sh
-uv run aiops analyze --input <출력된_snapshot.json_경로>
-# 모델 등 .env 설정이 있다면
-uv run aiops --env-file .env analyze --input <출력된_snapshot.json_경로>
-```
-
-`--since 24h`는 이번 증분 읽기의 시간 필터이며 과거 24시간 전체를 재수집하지 않습니다. `--backfill`은 처음 보는 파일을 시작부터 읽되 기존 체크포인트는 유지합니다. 옵션·회전·중단 복구·백업·보관 정책과 Airflow 연결 설계는 [수집 안내](docs/COLLECTION.md)를 참고하세요. 마스킹은 규칙 기반이므로 처음 운영 수집한 배치의 내용을 직접 검토한 뒤 외부 분석에 사용하세요.
-
-## 일일·주간·월간 보고서
-
-아래 직접 실행 설명은 기본 로컬 SQLite 모드 기준입니다. PostgreSQL 설정 시 `report run`은 큐 등록으로 바뀌며 다음 절의 Worker가 처리합니다.
-
-한국 시간 기준으로 **일일은 전날 데이터**, **주간은 지난 월~일의 일일 보고서 7개**, **월간은 지난달의 일일 보고서 전체**를 사용합니다. 월간의 주간 보고서는 보조 참고이며 중복 합산하지 않습니다. 수집 배치 하나를 하루로 간주하지 않습니다.
-
-```sh
-# AI 호출 없이 전날의 입력과 누락 상태부터 확인
-uv run aiops --env-file .env report prepare --type daily --config config/log_sources.yaml
-
-# 전날 일일 분석 (실제 Codex 호출, 결과 저장)
-uv run aiops --env-file .env report run --type daily --config config/log_sources.yaml
-
-# 일일 보고서가 완료된 뒤 실행: 지난주 / 지난달
-uv run aiops --env-file .env report run --type weekly
-uv run aiops --env-file .env report run --type monthly
-
-# 특정 날짜 재분석 또는 입력 확인: --date 2026-10-27 추가
-uv run aiops --env-file .env report list
-```
-
-`.env`를 쓰지 않으면 `--env-file .env`만 생략합니다. `--date`를 생략하면 마지막 종료된 기간을 자동 선택합니다. 현재 진행 중인 날짜·주·월은 받지 않습니다. 수집은 짧은 간격으로 별도 실행하며, 정기 수집에는 `--since`를 붙이지 않습니다.
-
-보고서는 `aiops_data/reports/`에 저장합니다. 같은 입력의 완료된 결과는 재사용하고, 지연 로그나 하위 보고서가 바뀌면 새 버전으로 분석합니다. 누락·오래된 하위 보고서는 `coverage_complete: false`로 표시하고 종료 코드 10을 반환할 수 있습니다. `report list`의 `stale`로 갱신 필요 여부를 확인합니다.
-
-커버리지의 기본 기대 수집 주기는 5분이며 실제 주기가 다르면 `--interval-minutes`로 맞춥니다. **Airflow DAG는 별도 프로젝트에서 관리합니다. API 호출 계약은 [API 안내](docs/AIRFLOW_API.md)를 따릅니다.** 기간·재실행·기존 데이터 호환·저장/복구의 상세 기준은 [정기 보고서 안내](docs/REPORTING.md)를 참고하세요.
-
-## PostgreSQL와 단일 Worker (Phase 3)
-
-PostgreSQL 테이블은 **public 스키마의 aiops_ 접두사**를 사용합니다. DB를 이미 만들었다면 .env의 dbname을 확인한 뒤 `setup`을 실행하면 됩니다. 기존 aiops 스키마 설치도 데이터를 유지하며 public으로 이전합니다. 정상 점검 결과는 `schema: public`, `migration: 2`입니다.
-
-서버 최초 적용은 [PostgreSQL·Worker 안내](docs/POSTGRES_WORKER.md)의 **DB/역할 준비 → .env 설정 → setup → API 실행 → Airflow 연결** 순서를 따릅니다. 스키마는 [생성 SQL](src/aiops/storage/sql/001_initial.sql)로 준비했으며 운영 DB에 자동 적용하지 않습니다.
-
-```dotenv
-# .env에 추가. 실제 DB 비밀번호를 사용하고 이 파일은 Git에 넣지 않습니다.
-AIOPS_DATABASE_URL="host=<DB_HOST> port=<DB_PORT> dbname=<DB_NAME> user=<DB_USER>"
-PGPASSWORD="DB_비밀번호"
-AIOPS_SOURCES_CONFIG=config/log_sources.yaml
-```
-
-```sh
-uv sync --locked
-uv run aiops --env-file .env setup
 uv run aiops --env-file .env status
 ```
 
-DB 모드의 `report run`은 즉시 AI 실행 대신 **큐에 등록**합니다. 실제 Codex 호출은 `worker --once` 또는 상시 `worker`에서 수행합니다. 같은 입력의 작업은 중복 등록하지 않으며 완료 결과를 재사용합니다. 요청 당시 모델을 유지하고, 인증·사용량 제한은 자동 반복하지 않습니다. 데이터가 오래되면 분석 대신 `CANCELLED/stale_input`으로 남기므로 해당 기간의 `report run`을 다시 실행합니다.
+API만 관리할 때는 `./scripts/restart-api.sh`, 웹만 관리할 때는 `./scripts/restart-web.sh`에 같은 `status`·`stop` 명령을 사용합니다. 실행 로그는 `log_history/api-YYYY-MM-DD.log`, `web-YYYY-MM-DD.log`에 한국 시간 날짜별로 저장합니다. 재부팅 후 자동 시작은 별도 설정이 필요합니다.
 
-`collect`는 파일 저장을 마친 뒤 PostgreSQL이 설정되어 있으면 배치 정보를 자동 등록합니다. DB 등록이 실패해도 수집 파일은 보존됩니다. AIOPS_DATABASE_URL을 설정하지 않으면 기존 로컬 SQLite 보고서 모드가 유지됩니다. DB 오류 종료 코드는 **11**이며 연결값과 서버 오류 원문을 출력하지 않습니다. 기본 운영 경로는 [Airflow → API](docs/AIRFLOW_API.md)입니다. 기존 systemd Worker 예제는 선택적인 대체 방식입니다.
+### 로컬에서 수집·분석 확인
 
-## 결과와 오류
+DB 없이 샘플을 확인하려면 다음 명령을 사용합니다. 기본 테스트 수집은 fixture 로그를 사용합니다.
 
-아래는 `analyze` 명령의 결과와 오류입니다. `collect`의 저장 구조·종료 코드는 위 수집 안내를 참고하세요.
+```sh
+uv run aiops doctor
+uv run aiops collect --all
+uv run aiops analyze --input config/sample.json
+```
 
-분석 결과 본문은 stdout으로만 출력합니다. 보고서를 보관하려면 민감정보 제거를 확인한 뒤 Git 제외 데이터 경로에 저장하세요. `aiops_data/<job_id>.json`에는 상태·오류 종류·시각·소요 시간·Provider·요청 모델·Thread ID만 기록합니다. 원문 로그·프롬프트·응답·인증 정보는 기록하지 않습니다. 모델을 미지정하면 메타데이터의 모델은 `null`이며 실제 모델을 추정하지 않습니다.
+운영 설정을 사용한 수동 점검은 다음과 같습니다. 아래는 Airflow 호출을 대신하는 진단 명령이며 매번 전부 실행할 필요는 없습니다.
 
-| 종료 코드 | 의미                                   |
-| --------- | -------------------------------------- |
-| 0         | 성공                                   |
-| 2         | 설정·입력·실행 파일 오류               |
-| 3         | 인증 오류                              |
-| 4         | 네트워크 오류                          |
-| 5         | 사용량 제한                            |
-| 6         | 시간 초과                              |
-| 7         | 동일 데이터 경로에서 다른 분석 실행 중 |
-| 8         | 잘못된 JSON 이벤트·결과 스키마         |
-| 9         | 기타 Codex 실행 실패                   |
+```sh
+uv run aiops --env-file .env collect --all
+uv run aiops --env-file .env report run --type daily
+uv run aiops --env-file .env worker --once
+```
 
-오류는 stderr의 `{"error": "..."}`로 전달하며 Codex의 원문 진단은 노출하지 않습니다. CLI가 구조화된 원인을 제공하지 않는 일부 오류는 문구 기반으로 분류하므로 알 수 없는 오류는 `execution`으로 남깁니다. 자동 재시도는 하지 않습니다. 인증·네트워크·사용량 문제 해결 후 같은 입력으로 다시 실행하세요.
+PostgreSQL 모드의 `report run`은 큐 등록까지만 합니다. DB 설정이 없는 로컬 모드에서는 직접 분석하므로 별도 Worker 실행이 필요하지 않습니다. 주간·월간은 하위 일일 보고서가 완료된 뒤 `--type weekly`, `--type monthly`로 요청합니다.
 
-동시 실행은 동일한 `AIOPS_DATA_DIR`의 OS 파일 잠금으로 1개로 제한합니다. 프로세스가 종료되면 잠금은 해제됩니다. 남아 있는 `codex.lock` 파일은 잠금 상태를 의미하지 않으므로 삭제하지 마세요. 다른 데이터 경로나 직접 실행한 `codex`까지 막지는 않습니다. 운영에서는 모든 AIOps 실행이 동일 경로를 사용해야 합니다.
+## 운영할 때 알아둘 점
 
-## 테스트
+- **수집 범위:** `partial`은 일부 누락이나 읽기 한도가 있어도 배치가 저장됐다는 뜻입니다. 새 로그 0건과 수집 실패를 구분하고 `coverage`·경고를 확인합니다.
+- **시간 필터:** `--since`는 이번 증분 읽기의 필터이며 과거 구간 전체를 재수집하지 않습니다. 정기 수집에는 붙이지 않습니다.
+- **저장과 복구:** 수집 파일은 DB 등록이 실패해도 보존합니다. 같은 DB를 쓰는 실행은 같은 호스트와 `AIOPS_DATA_DIR`를 사용합니다. 체크포인트나 이전 배치를 임의로 삭제하지 않습니다.
+- **민감정보:** 마스킹은 규칙 기반입니다. 최초 운영 배치를 검토한 뒤 외부 분석에 사용하고 `.env`·인증 파일·원본 로그·운영 결과를 커밋하지 않습니다.
+- **분석 실패:** 인증·사용량 제한·잘못된 결과는 자동 재시도하지 않습니다. 원인을 해결한 뒤 작업 상태에 맞게 재접수·재시도합니다.
+- **종료 코드:** `0`은 성공, `10`은 수집·입력의 불완전성, `11`은 DB 오류입니다. 분석 오류는 종류별 코드를 사용하며 상세 기준은 관련 기능 문서를 따릅니다.
+
+## 개발 환경과 검증
 
 ```sh
 uv run pytest -q
-# 실제 Codex 호출 포함 (명시적 opt-in)
+
+# 실제 Codex 호출이 필요한 경우에만 명시적으로 실행
 AIOPS_RUN_INTEGRATION=1 uv run pytest -q -m integration
 ```
 
-기본 테스트는 실제 Codex·PostgreSQL·네트워크·Docker daemon 없이 실행합니다. 실제 PostgreSQL 검증은 [별도 opt-in](docs/POSTGRES_WORKER.md)입니다. 정기 보고서는 기간 경계·윤년·지연 도착·버전 재사용·누락 전파·월간 입력 제한도 검증합니다. Phase 2는 증분·회전·덮어쓰기·미완성 줄·중단 복구·마스킹·HTTP 집계와 시스템/Docker 대역도 검증합니다. 가짜 Provider, CLI 오류 코드, 입력 제한, 결과 검증, 비밀정보 미기록, 프로세스 간 잠금, 타임아웃 시 자식 프로세스 종료를 검증합니다.
+기본 테스트는 실제 Codex·PostgreSQL·네트워크·Docker daemon 없이 대역으로 실행합니다. 실제 PostgreSQL 검증은 [별도 opt-in 절차](docs/POSTGRES_WORKER.md)를 사용합니다.
 
-[보안 및 배포 안내](docs/SECURITY.md), [입력 계약 초안](docs/BATCH_CONTRACT.md), [Phase 1](docs/PHASE1.md), [Phase 2](docs/PHASE2.md), [Phase 3](docs/PHASE3.md)를 참고하세요.
+## 상세 문서
 
-API와 웹의 통합 재시작은 `./restart.sh`, 전체 상태 확인은 `./restart.sh status`, 전체 종료는 `./restart.sh stop`입니다. API만 관리할 때는 `./scripts/restart-api.sh`, 웹만 관리할 때는 `./scripts/restart-web.sh`를 같은 방식으로 사용합니다. 로그는 `tail -f "log_history/api-$(TZ=Asia/Seoul date +%F).log"`으로 확인합니다. 로그 파일은 한국 시간 기준 날짜별로 나뉘고 실행 중 자정이 지나도 자동 전환됩니다. `log_history/`는 Git에서 제외합니다. 재부팅 후 자동 시작 기능은 포함하지 않습니다.
+| 문서                                                                              | 내용                                 |
+| --------------------------------------------------------------------------------- | ------------------------------------ |
+| [수집 안내](docs/COLLECTION.md)                                                   | 증분 읽기·회전·한도·체크포인트·보관  |
+| [정기 보고서](docs/REPORTING.md)                                                  | 기간·근거·수정본·누락·장애·성능 분석 |
+| [PostgreSQL·Worker](docs/POSTGRES_WORKER.md)                                      | DB 준비·마이그레이션·큐·재시도·복구  |
+| [Airflow API](docs/AIRFLOW_API.md)                                                | 외부 호출 계약과 작업 상태           |
+| [Worker 스트리밍](docs/WORKER_STREAM.md)                                          | SSE 이벤트와 Airflow 로그 수신       |
+| [조회 웹](docs/WEB.md)                                                            | 화면·조회 API·접근 방식              |
+| [Codex Provider](docs/CODEX_PROVIDER.md)                                          | 실행·인증·모델·진행 이벤트           |
+| [보안](docs/SECURITY.md) · [배치 계약](docs/BATCH_CONTRACT.md)                    | 읽기 경계·마스킹·입출력 기준         |
+| [Phase 1](docs/PHASE1.md) · [Phase 2](docs/PHASE2.md) · [Phase 3](docs/PHASE3.md) | 설계와 개발 범위                     |
+
+관련 프로젝트: [Airflow](https://github.com/eft-library/eft-library-airflow), [Backend](https://github.com/eft-library/eft-library-back), [Frontend](https://github.com/eft-library/eft-library-front), [Kafka Consumers](https://github.com/eft-library/eft-library-kafka).
