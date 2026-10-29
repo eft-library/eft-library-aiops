@@ -53,7 +53,7 @@ def advisory_lock(settings, key):
 def migration_sql():
     scripts = [
         files("aiops.storage").joinpath(name).read_text()
-        for name in ("sql/002_move_to_public.sql", "sql/001_initial.sql")
+        for name in ("sql/002_move_to_public.sql", "sql/001_initial.sql", "sql/003_investigations.sql")
     ]
     body = "\n".join(
         line
@@ -67,7 +67,7 @@ def migration_sql():
 def initialize(settings):
     with connect(settings) as conn:
         conn.execute(migration_sql(), prepare=False)
-    return {"status": "ready", "schema": "public", "migration": 2}
+    return {"status": "ready", "schema": "public", "migration": 3}
 
 
 def doctor(settings):
@@ -79,6 +79,6 @@ def doctor(settings):
         return {
             "status": "ready",
             "schema": "public",
-            "migration": 2,
+            "migration": conn.execute("SELECT max(version) AS version FROM public.aiops_schema_migrations").fetchone()["version"],
             "server_version": row["version"],
         }

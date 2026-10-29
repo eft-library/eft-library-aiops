@@ -38,7 +38,18 @@ class ReportRequest(BaseModel):
     interval_minutes: int = Field(default=5, ge=1, le=1440)
 
 
-def create_app(settings, *, token: str, sources_config: Path, provider=None):
+class InvestigationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    report_id: str = Field(min_length=1, max_length=128, pattern=r"^daily-[0-9-]+-v[0-9]+$")
+    request_key: str = Field(default="default", min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+
+
+class InvestigationRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    investigation_id: UUID | None = None
+
+
+def create_app(settings, *, token: str, sources_config: Path, provider=None, investigation_provider=None):
     if not token or not settings.database_url:
         raise ValueError("API requires AIOPS_API_TOKEN and AIOPS_DATABASE_URL")
     header = APIKeyHeader(name="X-AIOps-Key", auto_error=False)
@@ -116,6 +127,38 @@ def create_app(settings, *, token: str, sources_config: Path, provider=None):
             settings, body.type, body.date.isoformat() if body.date else None,
             config=sources_config, interval_minutes=body.interval_minutes,
         )
+
+    @app.post("/v1/investigations", status_code=202)
+    def investigation_submit(body: InvestigationRequest):
+        from aiops.investigation.store import InvalidParent, InvestigationStore
+
+        store = InvestigationStore(settings)
+        try:
+            return store.enqueue(body.report_id, body.request_key, settings.model)
+        except InvalidParent:
+            raise HTTPException(status_code=422, detail="completed_daily_report_required") from None
+        finally:
+            store.close()
+
+    @app.get("/v1/investigations/{investigation_id}")
+    def investigation_get(investigation_id: UUID):
+        from aiops.investigation.store import InvestigationStore
+
+        store = InvestigationStore(settings)
+        try:
+            result = store.get(investigation_id)
+            if result is None:
+                raise HTTPException(status_code=404, detail="unknown_investigation")
+            return result
+        finally:
+            store.close()
+
+    @app.post("/v1/investigations/worker/run-once")
+    def investigation_run(body: InvestigationRunRequest):
+        from aiops.investigation.service import run_once
+
+        return run_once(settings, sources_config, investigation_id=body.investigation_id,
+                        provider=investigation_provider)
 
     @app.post("/v1/worker/run-once")
     def worker_once():

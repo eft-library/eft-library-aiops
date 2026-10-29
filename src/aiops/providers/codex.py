@@ -64,8 +64,11 @@ def doctor(settings: Settings) -> dict:
 
 
 class CodexProvider:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, instructions=INSTRUCTIONS, report_type=Report, result_type=AnalysisResult):
         self.settings = settings
+        self.instructions = instructions
+        self.report_type = report_type
+        self.result_type = result_type
         data_directory(settings.data_dir)
 
     def analyze(self, request: AnalysisRequest) -> AnalysisResult:
@@ -122,11 +125,12 @@ class CodexProvider:
                         data_file(Path(schema), os.O_WRONLY | os.O_CREAT | os.O_TRUNC),
                         "w",
                     ) as stream:
-                        output_schema = Report.model_json_schema()
+                        output_schema = self.report_type.model_json_schema()
                         # Wire schema is explicit, while stored legacy JSON stays readable.
                         output_schema["required"] = list(output_schema["properties"])
                         for field in ("incident_analysis", "performance_analysis"):
-                            output_schema["properties"][field].pop("default", None)
+                            if field in output_schema["properties"]:
+                                output_schema["properties"][field].pop("default", None)
                         json.dump(output_schema, stream)
                     command = [
                         binary,
@@ -165,7 +169,7 @@ class CodexProvider:
                         timeout=self.settings.timeout,
                         cwd=workspace,
                         env=env,
-                        stdin=INSTRUCTIONS
+                        stdin=self.instructions
                         + "\n<untrusted_snapshot>\n"
                         + request.snapshot
                         + "\n</untrusted_snapshot>",
@@ -202,12 +206,12 @@ class CodexProvider:
                     )
                     if not messages:
                         raise ProviderError(ErrorKind.OUTPUT)
-                    result = AnalysisResult(
+                    result = self.result_type(
                         job_id=job_id,
                         provider="codex-cli",
                         model=self.settings.model,
                         thread_id=thread_id,
-                        report=Report.model_validate_json(messages[-1]),
+                        report=self.report_type.model_validate_json(messages[-1]),
                     )
                 except (ValueError, TypeError, KeyError, AttributeError):
                     raise ProviderError(ErrorKind.OUTPUT) from None

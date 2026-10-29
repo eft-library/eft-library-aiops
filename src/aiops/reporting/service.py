@@ -33,6 +33,16 @@ def fit_input(snapshot, limit):
             snapshot["weekly_context"].pop()
         else:
             children = snapshot.get("daily_reports", [])
+            followups = [child["investigation"] for child in children if child.get("investigation")]
+            detailed_followups = [value for value in followups if value.get("findings")]
+            if detailed_followups:
+                max(detailed_followups, key=lambda value: len(encoded(value)))["findings"].pop()
+                continue
+            long_followups = [value for value in followups if len(value["summary"]) > 160]
+            if long_followups:
+                value = max(long_followups, key=lambda value: len(value["summary"]))
+                value["summary"] = value["summary"][:max(160, len(value["summary"]) // 2)]
+                continue
             detailed = [child for child in children if child["findings"]]
             if detailed:
                 max(detailed, key=lambda item: len(encoded(item)))["findings"].pop()
@@ -326,6 +336,13 @@ class ReportingService:
             or manifest["outdated_report_ids"] != outdated
         ):
             return False
+        from aiops.investigation.store import completed_summaries
+
+        investigations = completed_summaries(self.settings, [value["report_id"] for value in available])
+        if manifest.get("investigation_ids", {}) != {
+            report_id: value["investigation_id"] for report_id, value in investigations.items()
+        }:
+            return False
         if row["kind"] == "monthly":
             context = self._weekly_context(period, collection)
             return manifest["weekly_context_ids"] == [
@@ -359,7 +376,16 @@ class ReportingService:
             "outdated_report_ids": outdated,
             "weekly_context_ids": [row["report_id"] for row in context],
         }
+        from aiops.investigation.store import completed_summaries
+
+        investigations = completed_summaries(self.settings, [row["report_id"] for row in available])
+        manifest["investigation_ids"] = {
+            report_id: value["investigation_id"] for report_id, value in investigations.items()
+        }
         daily_briefs = [brief(row) for row in available]
+        for child in daily_briefs:
+            if child["report_id"] in investigations:
+                child["investigation"] = investigations[child["report_id"]]
         snapshot = {
             "schema_version": 1,
             "analysis_type": period.kind,

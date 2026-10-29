@@ -49,7 +49,7 @@ API와 조회 웹은 별도 프로세스다. Worker는 HTTP 포트를 열지 않
 
 기존 .env의 접속 대상·계정·비밀번호와 `AIOPS_SOURCES_CONFIG=config/log_sources.yaml`을 확인한다. DB를 이미 만들었으므로 create_database.sql은 다시 실행하지 않는다. 최신 코드를 반영한 뒤 `uv sync --locked`, `uv run aiops --env-file .env setup`을 실행하면 준비가 끝난다.
 
-setup 결과 database 항목의 정상 기준은 `schema: public`, `migration: 2`다. 새 DB에는 public.aiops_* 7개 테이블이 생성된다. 실행 계정에 public의 CREATE 권한이 필요하다. DB 소유 계정이면 기본적으로 가능하며, 다른 계정을 사용한다면 관리자가 해당 계정에 public의 USAGE/CREATE 권한을 부여해야 한다.
+setup 결과 database 항목의 정상 기준은 `schema: public`, `migration: 3`다. 새 DB에는 public.aiops_* 9개 테이블이 생성된다. 실행 계정에 public의 CREATE 권한이 필요하다. DB 소유 계정이면 기본적으로 가능하며, 다른 계정을 사용한다면 관리자가 해당 계정에 public의 USAGE/CREATE 권한을 부여해야 한다.
 
 이전 버전의 aiops 스키마가 남아 있다면 setup이 테이블·데이터·참조·identity sequence를 보존하며 public.aiops_*로 이동한다. 이름 충돌 또는 불완전한 구성이 있으면 트랜잭션을 중단한다. 비어 있는 이전 스키마만 제거하며, 다른 객체가 남아 있으면 유지한다. 기존 public의 다른 테이블은 변경하지 않는다.
 
@@ -113,6 +113,8 @@ uv run aiops --env-file .env db doctor
 | public.aiops_report_dependencies | 입력 배치와 하위 daily/weekly_context 연결 |
 | public.aiops_analysis_jobs | 우선순위·대기/실행 상태·재시도 시각·소유 Worker |
 | public.aiops_job_attempts | 시도별 시작/종료·오류 코드·Provider job/Thread ID |
+| public.aiops_investigations | 일일 심화 조사 접수·상태·입력·결과 |
+| public.aiops_investigation_attempts | 조사 시도별 입력·결과·오류 |
 
 보고서와 작업 ID는 별개다. 보고서 ID는 기존 `daily-YYYY-MM-DD-v0001`을 유지하고 큐 작업은 UUID다. 새 배치 참조를 만들 때 관련 메타데이터도 등록한다.
 
@@ -220,3 +222,7 @@ AIOPS_RUN_POSTGRES_TESTS=1 AIOPS_POSTGRES_BIN=/path/to/postgresql17/bin uv run p
 테스트는 생성한 aiops_test DB만 사용하고 종료 후 클러스터를 중지·제거한다. root로 initdb를 실행하지 않는다. 가짜 AI Provider로 검증하며 Codex 호출은 하지 않는다.
 
 잠금·트랜잭션 설계는 [PostgreSQL 17 잠금 문서](https://www.postgresql.org/docs/17/explicit-locking.html)와 [Psycopg 트랜잭션 문서](https://www.psycopg.org/psycopg3/docs/basic/transactions.html)를 기준으로 했다. 장시간 AI 호출 중 SQL 트랜잭션을 열어두지 않으며 session lock만 유지한다. Airflow DAG·FastAPI·프론트의 실제 연결은 이 큐를 사용해 이후 구현한다.
+
+## 일일 심화 조사
+
+마이그레이션 3부터 별도 조사 큐를 지원한다. 기존 일일 보고서를 변경하지 않고 같은 단일 Worker 잠금 아래 현재 관측과 대응 가이드를 저장한다. 배포·Airflow 호출은 [INVESTIGATION.md](INVESTIGATION.md)를 따른다.

@@ -72,6 +72,10 @@ def report_detail(settings, report_id):
             WHERE report_id=%s""", (report_id,)).fetchone()
     if row is None:
         return None
+    from aiops.investigation.store import for_report
+
+    with connection(settings) as db:
+        investigations = for_report(db, report_id) if row["kind"] == "daily" else []
     source = row.pop("input_json")
     manifest = row.pop("manifest_json")
     result = row.pop("result_json")
@@ -89,14 +93,14 @@ def report_detail(settings, report_id):
     for child in [*source.get("daily_reports", []), *source.get("weekly_context", [])]:
         evidence[child["report_id"]] = child
     return {
-        **report_summary(row), "result": result,
+        **report_summary(row), "result": result, "investigations": investigations,
         "data_quality": source.get("data_quality", {}),
         "totals": source.get("totals", source.get("observed_totals", {})),
         "source_batch_count": source.get("source_batch_count"),
         "input_limitations": source.get("limitations", []),
         "evidence": evidence,
         "lineage": {key: manifest[key] for key in (
-            "batch_ids", "daily_report_ids", "missing_dates", "outdated_report_ids", "weekly_context_ids"
+            "batch_ids", "daily_report_ids", "missing_dates", "outdated_report_ids", "weekly_context_ids", "investigation_ids"
         ) if key in manifest},
     }
 

@@ -128,7 +128,7 @@ def seed(service, day="2020-01-01", suffix="one"):
 def test_migration_is_explicit_idempotent_and_scoped(pg_setup):
     settings, _, _ = pg_setup
     initialize(settings)
-    assert doctor(settings)["migration"] == 2
+    assert doctor(settings)["migration"] == 3
     with psycopg.connect(settings.database_url) as conn:
         rows = conn.execute(
             "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename LIKE 'aiops_%'"
@@ -141,6 +141,8 @@ def test_migration_is_explicit_idempotent_and_scoped(pg_setup):
             "aiops_report_dependencies",
             "aiops_analysis_jobs",
             "aiops_job_attempts",
+            "aiops_investigations",
+            "aiops_investigation_attempts",
         }
 
 
@@ -690,7 +692,7 @@ def test_legacy_upgrade_preserves_data_foreign_keys_and_identity(
     settings, _, _ = pg_setup
     previous_id = make_legacy_schema(settings, keep_unrelated=keep_unrelated)
     assert initialize(settings)["schema"] == "public"
-    assert doctor(settings)["migration"] == 2
+    assert doctor(settings)["migration"] == 3
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
         assert (
             conn.execute("SELECT report_id FROM public.aiops_analysis_jobs").fetchone()[
@@ -1061,3 +1063,147 @@ time.sleep(30)
         thread.join(timeout=10)
         listener.close()
         assert not thread.is_alive()
+
+
+def test_daily_investigation_queue_api_and_parent_preservation(pg_setup):
+    from fastapi.testclient import TestClient
+    from test_investigation import GuideProvider
+    from aiops.api import create_app
+    from aiops.investigation.service import run_once
+    from aiops.investigation.store import InvestigationStore
+    from aiops.storage import views
+
+    settings, service, config = pg_setup
+    parent = seed(service)
+    queue = JobQueue(settings)
+    queue.enqueue(parent['report_id'])
+    queue.close()
+    with Worker(settings, provider=FakeProvider()) as worker:
+        assert worker.once()['status'] == 'COMPLETED'
+    provider = GuideProvider()
+    client = TestClient(create_app(settings,token='secret',sources_config=config,investigation_provider=provider))
+    headers={'X-AIOps-Key':'secret'}
+    payload={'report_id':parent['report_id']}
+    first = client.post('/v1/investigations',headers=headers,json=payload)
+    assert first.status_code == 202
+    job = first.json()
+    assert client.post('/v1/investigations',headers=headers,json=payload).json()['job_id'] == job['job_id']
+    result = run_once(settings,config,investigation_id=job['investigation_id'],provider=provider,
+                      probes=lambda *args: [{'observation_id':'obs-1','probe':'system_metrics','data':{},'started_at':'2026-10-30T00:00:00Z'}])
+    assert result['status'] == 'COMPLETED'
+    assert run_once(settings,config,investigation_id=job['investigation_id'],provider=provider)['status'] == 'idle'
+    detail = client.get('/v1/investigations/'+job['investigation_id'],headers=headers).json()
+    assert detail['result']['report']['automatic_changes_performed'] is False
+    assert detail['input']['report_id'] == parent['report_id']
+    report = views.report_detail(settings,parent['report_id'])
+    assert report['status'] == 'COMPLETED'
+    assert report['investigations'][0]['status'] == 'COMPLETED'
+    assert len(provider.requests) == 1
+    follow = client.post('/v1/investigations',headers=headers,json={**payload,'request_key':'next-observation'}).json()
+    assert follow['job_id'] != job['job_id']
+    actual = client.post('/v1/investigations/worker/run-once',headers=headers,
+                         json={'investigation_id':follow['investigation_id']})
+    assert actual.status_code == 200 and actual.json()['status'] == 'COMPLETED'
+    assert len(provider.requests) == 2
+    assert client.post('/v1/investigations',headers=headers,json={'report_id':'daily-2099-01-01-v0001'}).status_code == 422
+    assert client.get('/v1/investigations/'+str(uuid4()),headers=headers).status_code == 404
+
+
+def test_investigation_failure_retry_fencing_and_shared_worker_lock(pg_setup):
+    from test_investigation import GuideProvider, guide
+    from aiops.investigation.service import run_once
+    from aiops.investigation.store import InvestigationStore
+    from aiops.storage.postgres import WORKER_LOCK
+
+    settings, service, config = pg_setup
+    parent=seed(service)
+    queue=JobQueue(settings)
+    queue.enqueue(parent['report_id'])
+    queue.close()
+    store=InvestigationStore(settings)
+    with pytest.raises(ValueError):
+        store.enqueue(parent['report_id'],'before-complete',None)
+    with Worker(settings,provider=FakeProvider()) as worker:
+        worker.once()
+    job=store.enqueue(parent['report_id'],'default',None)
+    with advisory_lock(settings, WORKER_LOCK):
+        with pytest.raises(ProviderError) as error:
+            run_once(settings,config,provider=GuideProvider())
+        assert error.value.kind == ErrorKind.BUSY
+    owner=uuid4()
+    claimed=store.claim(owner)
+    assert store.finish(claimed,uuid4(),result=guide(parent['report_id']).model_dump()) is None
+    failed=store.finish(claimed,owner,error='network')
+    assert failed['status'] == 'PENDING'
+    store.db.execute('UPDATE public.aiops_investigations SET available_at=now()')
+    new=store.claim(uuid4())
+    store.recover()
+    assert store.get(job['job_id'])['status'] == 'PENDING'
+    store.db.execute('UPDATE public.aiops_investigations SET available_at=now()')
+    new=store.claim(owner)
+    terminal=store.finish(new,owner,error='authentication')
+    assert terminal['status'] == 'FAILED'
+    assert store.parent(parent['report_id'])['status'] == 'COMPLETED'
+    attempts=store.db.execute('SELECT count(*) AS count FROM public.aiops_investigation_attempts').fetchone()
+    assert attempts['count']==3
+    store.close()
+
+
+def test_weekly_uses_completed_investigation_and_invalidates_when_changed(pg_setup):
+    from test_investigation import GuideProvider
+    from aiops.investigation.service import run_once
+    from aiops.investigation.store import InvestigationStore
+
+    settings,service,config=pg_setup
+    parent=seed(service,day='2020-01-01')
+    queue=JobQueue(settings);queue.enqueue(parent['report_id']);queue.close()
+    with Worker(settings,provider=FakeProvider()) as worker:worker.once()
+    first=service.execute('weekly','2020-01-01')
+    store=InvestigationStore(settings)
+    job=store.enqueue(parent['report_id'],'default',None)
+    assert run_once(settings,config,provider=GuideProvider(),probes=lambda *args:[])['status']=='COMPLETED'
+    assert not service.is_current(first['report_id'])
+    second=service.execute('weekly','2020-01-01')
+    assert second['report_id'] != first['report_id']
+    snapshot=json.loads(Path(second['input']).read_text())
+    assert snapshot['daily_reports'][0]['investigation']['investigation_id']==job['job_id']
+    assert service.is_current(second['report_id'])
+    # Monthly also consumes saved summaries; it never calls the probe collector.
+    monthly=service.execute('monthly','2020-01-01')
+    assert json.loads(Path(monthly['input']).read_text())['daily_reports'][0]['investigation']['investigation_id']==job['job_id']
+    store.close()
+
+
+def test_postgres_probe_uses_read_only_transaction_and_no_query_text(pg_setup):
+    from aiops.investigation.probes import postgres_statistics
+    settings,_,_=pg_setup
+    result=postgres_statistics(settings)
+    assert 'Configured AIOps database only' in result['scope']
+    assert 'database' in result and 'locks' in result
+    assert 'query' not in json.dumps(result,default=str)
+
+
+def test_investigation_busy_and_invalid_output_do_not_change_daily(pg_setup):
+    from test_investigation import GuideProvider, guide
+    from aiops.investigation.service import run_once
+    from aiops.investigation.store import InvestigationStore
+
+    settings,service,config=pg_setup
+    parent=seed(service)
+    queue=JobQueue(settings);queue.enqueue(parent['report_id']);queue.close()
+    with Worker(settings,provider=FakeProvider()) as worker:worker.once()
+    store=InvestigationStore(settings)
+    job=store.enqueue(parent['report_id'],'default',None)
+    class Busy:
+        def analyze(self,request):raise ProviderError(ErrorKind.BUSY)
+    result=run_once(settings,config,provider=Busy(),probes=lambda *args:[])
+    assert result['status']=='PENDING' and result['attempt_count']==0
+    assert store.db.execute('SELECT count(*) AS count FROM public.aiops_investigation_attempts').fetchone()['count']==0
+    store.db.execute('UPDATE public.aiops_investigations SET available_at=now()')
+    class Bad:
+        def analyze(self,request):return guide('unknown-evidence')
+    result=run_once(settings,config,provider=Bad(),probes=lambda *args:[])
+    assert result['status']=='FAILED' and result['error']=='invalid_output'
+    assert store.get(job['job_id'])['result'] is None
+    assert store.parent(parent['report_id'])['status']=='COMPLETED'
+    store.close()

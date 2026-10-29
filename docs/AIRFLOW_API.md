@@ -1,6 +1,6 @@
 # Docker Airflow → AIOps HTTP API
 
-운영 기준은 **Airflow 3.1.5(Docker) → 호스트의 AIOps API**다. Airflow 컨테이너에는 프로젝트·로그·Codex 인증을 마운트하지 않는다. AIOps는 Codex 인증이 준비된 계정으로 호스트에서 실행하며 같은 aiops_data와 public.aiops_*를 사용한다. 스키마 변경은 없다.
+운영 기준은 **Airflow 3.1.5(Docker) → 호스트의 AIOps API**다. Airflow 컨테이너에는 프로젝트·로그·Codex 인증을 마운트하지 않는다. AIOps는 Codex 인증이 준비된 계정으로 호스트에서 실행하며 같은 aiops_data와 public.aiops_*를 사용한다. 심화 조사를 사용하려면 마이그레이션 3이 필요하다.
 
 ```text
 Docker Airflow ── HTTP + API key ──> 호스트 AIOps API
@@ -97,4 +97,8 @@ API 재시작 후에도 작업 큐·분석 결과는 DB에 남는다. 중단된 
 
 ## 실시간 진행 로그
 
-진행 로그가 필요하면 Worker 호출만 /v1/worker/run-once/stream으로 바꾸고 SSE를 줄 단위로 받아 Airflow logger에 기록한다. 기존 JSON Worker API도 계속 사용할 수 있다. 이 기능은 외부 Airflow 프로젝트의 수신부 수정이 필요하며 DB 스키마 변경은 없다. 내부 reasoning은 전달하지 않는다. [WORKER_STREAM.md](WORKER_STREAM.md)의 이벤트·완료·연결 종료 계약을 따른다.
+진행 로그가 필요하면 Worker 호출만 /v1/worker/run-once/stream으로 바꾸고 SSE를 줄 단위로 받아 Airflow logger에 기록한다. 기존 JSON Worker API도 계속 사용할 수 있다. 이 기능은 외부 Airflow 프로젝트의 수신부 수정이 필요하며 DB 심화 조사를 사용하려면 마이그레이션 3이 필요하다. 내부 reasoning은 전달하지 않는다. [WORKER_STREAM.md](WORKER_STREAM.md)의 이벤트·완료·연결 종료 계약을 따른다.
+
+## 일일 완료 후 심화 조사
+
+일일 DAG에서만 `POST /v1/investigations` → `POST /v1/investigations/worker/run-once` → `GET /v1/investigations/{id}`를 추가할 수 있다. 완료된 일일 report_id를 전달한다. 기존 보고서 Worker와 별도 큐이며 주간·월간은 추가 조회하지 않는다. 마이그레이션 3과 새 API의 재시도·상태 계약은 [INVESTIGATION.md](INVESTIGATION.md)를 따른다.
