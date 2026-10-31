@@ -14,7 +14,7 @@ const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[name] 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const num = value => Number.isFinite(Number(value)) && value !== null ? Number(value).toLocaleString('ko-KR') : '—';
 const kinds = {daily:'일일',weekly:'주간',monthly:'월간'};
-const labels = {WARNING:'주의',CRITICAL:'심각',OK:'정상',INFO:'참고',COMPLETED:'분석 완료',PENDING:'대기 중',PREPARED:'입력 준비',RUNNING:'분석 중',FAILED:'실패',TIMEOUT:'시간 초과',CANCELLED:'취소',collected:'수집 완료',partial:'부분 수집',disabled:'비활성',failed:'수집 실패'};
+const labels = {WARNING:'주의',CRITICAL:'심각',OK:'정상',INFO:'참고',COMPLETED:'분석 완료',PENDING:'대기 중',PREPARED:'입력 준비',RUNNING:'분석 중',FAILED:'실패',TIMEOUT:'시간 초과',CANCELLED:'취소',collected:'수집 완료',partial:'처리 참고',disabled:'비활성',failed:'수집 실패'};
 const badge = (value, custom) => `<span class="badge ${esc(String(value || 'unknown').toLowerCase())}">${esc(custom || labels[value] || value || '평가 전')}</span>`;
 const stamp = (value, time = true) => {
  if (!value) return '—';
@@ -32,7 +32,42 @@ const period = row => {
 };
 const reportName = row => `${kinds[row.kind] || '운영'} 분석 보고서`;
 const reportURL = id => `#report/${encodeURIComponent(id)}`;
-const qualityText = row => row.coverage_complete ? '수집 기준 충족' : '일부 데이터 누락';
+const continuationReasons = new Set(['file_record_limit','read_limit','record_limit','run_limit','scan_limit','scan_entry_limit','source_file_limit','scan_timeout','source_timeout','incomplete_line_deferred']);
+const routineReasons = new Set(['renamed_file_followed','file_rewritten_or_truncated','scan_cursor_reset','since_unknown_timestamp_retained']);
+const warningLabels = {
+ file_record_limit:'파일별 처리량을 나눠 다음 실행에서 이어 읽습니다',read_limit:'읽기 한도까지 처리하고 다음 실행에서 이어 읽습니다',record_limit:'기록 수 한도까지 처리하고 다음 실행에서 이어 읽습니다',run_limit:'실행 한도에 따라 다음 수집으로 넘겼습니다',scan_limit:'남은 경로는 다음 실행에서 탐색합니다',scan_entry_limit:'경로 탐색을 나눠 진행합니다',source_file_limit:'파일 탐색을 나눠 진행합니다',scan_depth_limit:'탐색 깊이 제한으로 추가 경로 확인이 필요합니다',scan_timeout:'탐색 시간 한도로 남은 경로는 다음에 확인합니다',source_timeout:'소스 처리 시간이 끝나 다음 실행에서 이어 확인합니다',timeout:'처리 시간 한도에 도달했습니다. 다음 실행 상태를 확인하세요',incomplete_line_deferred:'줄 끝이 아직 완성되지 않아 다음 실행에서 다시 확인합니다',file_rewritten_or_truncated:'로그 교체·크기 변경을 감지해 읽기 위치를 조정했습니다',renamed_file_followed:'이름이 바뀐 로그 파일을 이어 읽었습니다',scan_cursor_reset:'탐색 위치를 다시 설정했습니다',since_unknown_timestamp_retained:'시각 없는 기록도 보존했습니다',initial_history_skipped:'첫 수집에서 과거 일부 기록을 제외했습니다',permission_denied:'로그 읽기 권한을 확인하세요',active_file_missing:'설정된 로그 파일을 찾지 못했습니다',no_matching_files:'설정에 맞는 로그 파일이 없습니다',encoding_replaced:'일부 문자를 대체해 읽었습니다',oversized_line_dropped:'크기 제한을 넘는 기록을 제외했습니다',symlink_excluded:'심볼릭 링크는 읽기 대상에서 제외했습니다',file_disappeared_during_scan:'탐색 중 파일이 사라져 확인이 필요합니다',directory_disappeared_during_scan:'탐색 중 폴더가 사라져 확인이 필요합니다'
+};
+function collectionState(service) {
+ const warnings=service.warnings || [];
+ if(service.status==='disabled')return {tone:'disabled',label:'비활성',attention:false};
+ if(service.status==='failed')return {tone:'failed',label:'수집 확인 필요',attention:true};
+ if(warnings.some(reason=>!continuationReasons.has(reason)&&!routineReasons.has(reason)))return {tone:'partial',label:'수집 참고 사항',attention:true};
+ if(warnings.some(reason=>['scan_depth_limit','timeout'].includes(reason)))return {tone:'partial',label:'처리 상태 확인',attention:true};
+ if(warnings.includes('incomplete_line_deferred'))return {tone:'continuing',label:'다음 확인 대기',attention:false};
+ if(warnings.some(reason=>continuationReasons.has(reason)))return {tone:'continuing',label:'이어서 수집 예정',attention:false};
+ if(service.status==='partial')return {tone:'partial',label:'처리 상태 확인',attention:true};
+ return {tone:'collected',label:'이번 수집 완료',attention:false};
+}
+function qualitySummary(row) {
+ if(row.coverage_complete)return {text:'수집 기준 충족',detail:'설정된 수집·품질 기준을 충족했습니다.',attention:false};
+ const q=row.data_quality || {};
+ if(row.kind && row.kind!=='daily')return {text:'하위 보고서 참고 사항',detail:'하위 일일 보고서의 가용 상태와 품질 참고 사항을 확인하세요.',attention:true};
+ if(Number(q.expected_slots)>0 && Number(q.observed_slots)<Number(q.expected_slots))return {text:'수집 실행 공백 확인',detail:'관측된 수집 실행 구간이 기대 구간보다 적습니다. 실행 이력을 확인하세요.',attention:true};
+ const failures=Object.entries(q.collection_failures || {}).filter(([,count])=>Number(count)>0);
+ const actionable=failures.filter(([key])=>!continuationReasons.has(key.split(':').pop())&&!routineReasons.has(key.split(':').pop()));
+ const warningChecks=Object.entries(q.collection_warnings || {}).filter(([key,count])=>Number(count)>0&&!continuationReasons.has(key.split(':').pop())&&!routineReasons.has(key.split(':').pop()));
+ if(actionable.length || warningChecks.length)return {text:'수집 확인 사항 있음',detail:'서비스별 읽기 실패 또는 별도 확인이 필요한 기록이 있습니다. 상세 항목을 확인하세요.',attention:true};
+ if(q.unassigned_timestamp_events || q.unclassified_level_events || q.encoding_error_events || q.excluded_by_collection_time_filter || q.legacy_metrics_batches)return {text:'데이터 품질 참고 사항',detail:'시각·수준 인식, 인코딩, 필터 또는 이전 지표 형식의 제한이 있습니다. 수집 실행 공백과는 별개입니다.',attention:true};
+ if(failures.length || Object.keys(q.collection_warnings || {}).length)return {text:'분할 처리 · 대기 기록 있음',detail:'처리 한도나 미완성 기록으로 다음 실행에 이어 확인한 항목이 있습니다. 이 표시만으로 데이터 유실을 뜻하지 않으며, 후속 처리 완료를 보장하지 않습니다.',attention:false};
+ return {text:'서비스별 처리 상태 참고',detail:'엄격한 수집·품질 기준의 참고 사항이 있습니다. 이 표시만으로 데이터 유실을 뜻하지 않습니다.',attention:false};
+}
+const qualityText = row => qualitySummary(row).text;
+function qualityDetails(row) {
+ const q=row.data_quality || {};
+ const entries=[['collection_failures','서비스별 처리 이력'],['collection_warnings','서비스별 참고 이력']];
+ return entries.map(([key,title])=>Object.keys(q[key] || {}).length?`<details class="quality-explanation"><summary>${title}</summary><ul>${Object.entries(q[key]).map(([name,count])=>{const parts=name.split(':');const reason=parts.pop();return `<li><strong>${esc(parts.join(':'))}</strong>: ${esc(warningLabels[reason] || '추가 확인 항목: '+reason)} (${num(count)}회)</li>`;}).join('')}</ul></details>`:'').join('')+`<div class="service-message">시각 미배정 ${num(q.unassigned_timestamp_events || 0)}건 · 수준 미인식 ${num(q.unclassified_level_events || 0)}건 · 인코딩 오류 ${num(q.encoding_error_events || 0)}건</div>`;
+}
+
 const empty = (title, description, className='') => `<div class="empty ${className}">${icon('reports')}<strong>${esc(title)}</strong><p>${esc(description)}</p></div>`;
 const more = (href, text='전체 보기') => `<a class="text-link" href="${esc(href)}">${esc(text)} ${icon('arrow')}</a>`;
 let revision=0;
@@ -93,11 +128,11 @@ async function dashboard(ticket) {
  const active=Object.values(coverage).filter(s=>s.status!=='disabled');
  const done=active.filter(s=>s.status==='collected').length;
  content.innerHTML=head('운영 대시보드','서비스의 상태와 분석 결과를 한눈에 확인하세요.')+`
- ${lastDaily&&!lastDaily.coverage_complete?`<aside class="coverage-banner" aria-label="수집 품질 안내"><span class="coverage-banner-icon">${icon('warning')}</span><div><strong>수집 범위가 불완전한 보고서입니다</strong><p>${esc(dayLabel(lastDaily.period.start))} · 정기 수집 ${num(observed)} / ${num(expected)} 슬롯. 관측되지 않은 구간은 정상으로 판단하지 않습니다.</p></div><a href="${reportURL(lastDaily.report_id)}">수집 근거 확인 ${icon('arrow')}</a></aside>`:''}
+ ${lastDaily&&!lastDaily.coverage_complete?`<aside class="coverage-banner ${qualitySummary(lastDaily).attention?'':'coverage-info'}" aria-label="수집 처리 안내"><span class="coverage-banner-icon">${icon('warning')}</span><div><strong>${esc(qualityText(lastDaily))}</strong><p>${esc(dayLabel(lastDaily.period.start))} · 정기 수집 ${num(observed)} / ${num(expected)} 구간. ${esc(qualitySummary(lastDaily).detail)}</p></div><a href="${reportURL(lastDaily.report_id)}">수집 근거 확인 ${icon('arrow')}</a></aside>`:''}
  <section class="kpi-grid" aria-label="주요 현황">
  <article class="kpi"><div class="kpi-label">${icon('warning')}최근 분석 위험도</div><div class="kpi-value ${latest?.severity==='WARNING'?'warn':latest?.severity==='CRITICAL'?'danger':latest?.severity?'green':''}">${esc(labels[latest?.severity] || '평가 전')}</div><div class="kpi-foot">${latest?esc(period(latest))+' · '+esc(kinds[latest.kind])+' 분석':'완료된 분석을 기다리고 있습니다'}</div></article>
  <article class="kpi"><div class="kpi-label">${icon('collections')}일일 수집 이벤트</div><div class="kpi-value">${num(lastDaily?.totals?.events)}<small>건</small></div><div class="kpi-foot">${lastDaily?esc(dayLabel(lastDaily.period.start))+' 보고서 기준':'일일 보고서 기준'}</div><div class="kpi-deco" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div></article>
- <article class="kpi"><div class="kpi-label">${icon('check')}정기 수집 슬롯</div><div class="kpi-value purple">${num(observed)}<small>/ ${num(expected)}</small></div><div class="kpi-foot">${lastDaily?esc(dayLabel(lastDaily.period.start))+' · '+esc(qualityText(lastDaily)):'일일 보고서 생성 후 확인 가능'}</div></article>
+ <article class="kpi"><div class="kpi-label">${icon('check')}수집 실행 구간</div><div class="kpi-value purple">${num(observed)}<small>/ ${num(expected)}</small></div><div class="kpi-foot">${lastDaily?esc(dayLabel(lastDaily.period.start))+' · '+esc(qualityText(lastDaily)):'일일 보고서 생성 후 확인 가능'}</div></article>
  <article class="kpi"><div class="kpi-label">${icon('clock')}분석 대기 작업</div><div class="kpi-value">${num(pending.total)}<small>개</small></div><div class="kpi-foot">최근 수집 ${lastBatch?esc(stamp(lastBatch.collected_at)):'기록 없음'}</div></article>
  </section>
  <div class="dashboard-grid"><section class="panel"><div class="panel-heading"><h2>일일 수집 추이<span class="sub">최근 일일 보고서의 관측 이벤트 수 · 누락일은 집계하지 않음</span></h2><span class="chart-legend"><i class="legend-dot"></i>수집 이벤트</span></div>${trend(daily.items)}</section>
@@ -166,7 +201,7 @@ async function detailPage(id,ticket) {
  ${daily?specialistSection('incident_analysis','장애 분석',data)+specialistSection('performance_analysis','성능 분석',data)+investigationSection(data):''}
  <section class="panel limitations" id="report-limitations"><h2>분석 한계 및 참고 사항</h2><ul>${(report?.limitations?.length?report.limitations:data.input_limitations || []).map(line=>`<li>${esc(line)}</li>`).join('') || '<li>등록된 참고 사항이 없습니다.</li>'}</ul></section></div>
  <aside class="detail-side"><section class="panel"><h3>보고서 정보</h3>${metadata([['분석 유형',esc(kinds[data.kind])],['수정 버전',`v${String(data.revision).padStart(4,'0')}`],['생성 시각',esc(stamp(data.created_at))],['완료 시각',esc(stamp(data.completed_at))],['분석 모델',esc(data.result?.model || '—')],['자동 변경',data.result?'수행하지 않음':'—'],['관측 이벤트',num(data.totals?.events)+'건'],...(data.error?[['오류',`<span class="error-code">${esc(data.error)}</span>`]]:[])])}</section>
- <section class="panel"><h3>데이터 수집 품질</h3>${badge(data.coverage_complete?'collected':'partial',data.coverage_complete?'수집 기준 충족':'불완전한 데이터')}<div class="progress-track"><div class="progress-fill" style="width:${ratio}%"></div></div><div class="coverage-label"><span>${daily?'관측 슬롯':'완료된 일일 보고서'}</span><span>${num(observed)} / ${num(expected)}</span></div><div class="quality-grid"><div class="quality-metric"><strong>${num(daily?data.source_batch_count:quality.missing_dates?.length)}</strong>${daily?'입력 배치':'누락 날짜'}</div><div class="quality-metric"><strong>${num(daily?quality.unclassified_level_events:quality.incomplete_daily_reports?.length)}</strong>${daily?'미분류 이벤트':'불완전 일일'}</div><div class="quality-metric"><strong>${num(daily?quality.encoding_error_events:quality.outdated_report_ids?.length)}</strong>${daily?'인코딩 오류':'오래된 일일'}</div></div>${!data.coverage_complete?'<p class="service-message">누락된 시간대나 보고서는 정상으로 간주하지 않습니다.</p>':''}</section>
+ <section class="panel"><h3>데이터 수집 품질</h3>${badge(data.coverage_complete?'collected':qualitySummary(data).attention?'partial':'continuing',qualityText(data))}<div class="progress-track"><div class="progress-fill" style="width:${ratio}%"></div></div><div class="coverage-label"><span>${daily?'수집 실행 구간':'완료된 일일 보고서'}</span><span>${num(observed)} / ${num(expected)}</span></div><div class="quality-grid"><div class="quality-metric"><strong>${num(daily?data.source_batch_count:quality.missing_dates?.length)}</strong>${daily?'입력 배치':'누락 날짜'}</div><div class="quality-metric"><strong>${num(daily?quality.unclassified_level_events:quality.incomplete_daily_reports?.length)}</strong>${daily?'미분류 이벤트':'불완전 일일'}</div><div class="quality-metric"><strong>${num(daily?quality.encoding_error_events:quality.outdated_report_ids?.length)}</strong>${daily?'인코딩 오류':'오래된 일일'}</div></div><p class="service-message">${esc(qualitySummary(data).detail)}</p>${daily?qualityDetails(data):''}</section>
  ${childIds.length?`<section class="panel"><h3>입력 일일 보고서</h3><div class="history-list">${childIds.map(child=>`<a href="${reportURL(child)}">${esc(child)}</a>`).join('')}</div></section>`:''}
  </aside></div>`;bindCommon();connection(true);
 }
@@ -174,9 +209,9 @@ async function collectionPage(query,ticket) {
  const params=new URLSearchParams(query);params.set('page_size','12');
  const [data,latest]=await Promise.all([api('collections?'+params),api('collections?page_size=1')]);if(ticket!==revision)return;
  const batch=latest.items[0];const services=Object.entries(batch?.coverage || {});
- content.innerHTML=head('수집 현황','최근 배치의 서비스별 수집 범위와 수집 이력을 확인하세요.','COLLECTION STATUS')+`
- ${batch?`<div class="result-count">최근 수집 ${esc(stamp(batch.collected_at))} · 배치 ${esc(batch.batch_id)}</div><section class="service-grid">${services.map(([name,service])=>`<article class="service-card"><div class="service-card-head"><span>${esc(name)}</span>${badge(service.status)}</div><div class="service-card-stats"><span><strong>${num(service.events)}</strong>이벤트</span><span><strong>${num(service.files)}</strong>파일</span><span><strong>${num(Math.round((service.bytes_read||0)/1024))}</strong>KB 읽음</span></div>${service.warnings?.length?`<div class="service-warnings">${esc(service.warnings.join(' · '))}</div>`:`<div class="service-message">${service.status==='disabled'?'수집 대상에서 비활성화되어 있습니다.':'이 배치에 등록된 수집 경고가 없습니다.'}</div>`}</article>`).join('')}</section>`:empty('아직 수집 배치가 없습니다','정기 수집이 시작되면 서비스별 현황이 표시됩니다.')}
- <section class="panel table-section"><div class="panel-heading"><h2>수집 배치 이력<span class="sub">DB에 등록된 배치 기준 · 서비스 정상 여부와는 별개입니다.</span></h2></div>${data.items.length?`<div class="table-wrap"><table class="data-table"><thead><tr><th>배치 ID</th><th>수집 시각 · KST</th><th>이벤트</th><th>읽은 용량</th><th>수집 범위</th></tr></thead><tbody>${data.items.map(row=>{const sources=Object.values(row.coverage).filter(s=>s.status!=='disabled');const complete=sources.filter(s=>s.status==='collected').length;return `<tr><td class="batch-name">${esc(row.batch_id)}</td><td class="numeric">${esc(stamp(row.collected_at))}</td><td class="numeric">${num(row.totals?.events)}</td><td class="numeric">${num(Math.round((row.totals?.bytes_read||0)/1024))} KB</td><td>${badge(complete===sources.length?'collected':'partial',`${complete}/${sources.length}개 소스 완료`)}</td></tr>`;}).join('')}</tbody></table></div>`:empty('등록된 이력이 없습니다','다음 수집 이후 등록 상태를 확인해 주세요.')}${pager(data)}</section>`;bindCommon();bindPages();connection(true);
+ content.innerHTML=head('수집 현황','최근 배치의 서비스별 처리 상태와 수집 이력을 확인하세요. 이어서 처리하는 상태는 수집 실패와 구분합니다.','COLLECTION STATUS')+`
+ ${batch?`<div class="result-count">최근 수집 ${esc(stamp(batch.collected_at))} · 배치 ${esc(batch.batch_id)}</div><section class="service-grid">${services.map(([name,service])=>`<article class="service-card"><div class="service-card-head"><span>${esc(name)}</span>${badge(collectionState(service).tone,collectionState(service).label)}</div><div class="service-card-stats"><span><strong>${num(service.events)}</strong>이벤트</span><span><strong>${num(service.files)}</strong>파일</span><span><strong>${num(Math.round((service.bytes_read||0)/1024))}</strong>KB 읽음</span></div>${service.warnings?.length?`<div class="service-warnings ${collectionState(service).attention?'':'service-continuing'}">${[...new Set(service.warnings.map(reason=>warningLabels[reason] || '추가 확인 항목: '+reason))].map(text=>`<p>${esc(text)}</p>`).join('')}</div>`:`<div class="service-message">${service.status==='disabled'?'수집 대상에서 비활성화되어 있습니다.':'이번 실행에서 추가 확인할 사항이 없습니다.'}</div>`}</article>`).join('')}</section>`:empty('아직 수집 배치가 없습니다','정기 수집이 시작되면 서비스별 현황이 표시됩니다.')}
+ <section class="panel table-section"><div class="panel-heading"><h2>수집 배치 이력<span class="sub">DB에 등록된 배치 기준 · 서비스 정상 여부와는 별개입니다.</span></h2></div>${data.items.length?`<div class="table-wrap"><table class="data-table"><thead><tr><th>배치 ID</th><th>수집 시각 · KST</th><th>이벤트</th><th>읽은 용량</th><th>수집 범위</th></tr></thead><tbody>${data.items.map(row=>{const sources=Object.values(row.coverage).filter(s=>s.status!=='disabled');const complete=sources.filter(s=>s.status==='collected').length;const attention=sources.filter(s=>collectionState(s).attention).length;const continuing=sources.filter(s=>collectionState(s).tone==='continuing').length;return `<tr><td class="batch-name">${esc(row.batch_id)}</td><td class="numeric">${esc(stamp(row.collected_at))}</td><td class="numeric">${num(row.totals?.events)}</td><td class="numeric">${num(Math.round((row.totals?.bytes_read||0)/1024))} KB</td><td>${badge(attention?'partial':continuing?'continuing':'collected',`완료 ${complete} · 이어 확인 ${continuing} · 참고 ${attention}`)}</td></tr>`;}).join('')}</tbody></table></div>`:empty('등록된 이력이 없습니다','다음 수집 이후 등록 상태를 확인해 주세요.')}${pager(data)}</section>`;bindCommon();bindPages();connection(true);
 }
 async function jobsPage(query,ticket) {
  const params=new URLSearchParams(query);params.set('page_size','12');const data=await api('jobs?'+params);if(ticket!==revision)return;
