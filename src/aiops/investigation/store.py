@@ -5,11 +5,11 @@ from uuid import UUID, uuid4
 
 from psycopg.types.json import Jsonb
 
-from aiops.investigation.models import INSTRUCTIONS
+from aiops.investigation.models import INSTRUCTIONS, PLANNING_INSTRUCTIONS
 from aiops.storage.jobs import RETRYABLE, public_job
 from aiops.storage.postgres import connect, require_schema
 
-POLICY_HASH = hashlib.sha256(INSTRUCTIONS.encode()).hexdigest()
+POLICY_HASH = hashlib.sha256((INSTRUCTIONS + PLANNING_INSTRUCTIONS + "typed-probes-v2").encode()).hexdigest()
 
 
 class InvalidParent(ValueError):
@@ -49,6 +49,8 @@ class InvestigationStore:
         self.db.close()
 
     def enqueue(self, report_id, request_key, model):
+        # Keep caller retries idempotent while preserving results from earlier policies.
+        request_key = hashlib.sha256((request_key + "\0" + POLICY_HASH).encode()).hexdigest()
         with self.db.transaction():
             parent = self.db.execute("""SELECT v.status,p.kind FROM public.aiops_report_versions v
                 JOIN public.aiops_reports p USING(period_id) WHERE report_id=%s FOR SHARE OF v""", (report_id,)).fetchone()

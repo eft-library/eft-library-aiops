@@ -126,11 +126,18 @@ class CodexProvider:
                         "w",
                     ) as stream:
                         output_schema = self.report_type.model_json_schema()
-                        # Wire schema is explicit, while stored legacy JSON stays readable.
-                        output_schema["required"] = list(output_schema["properties"])
-                        for field in ("incident_analysis", "performance_analysis"):
-                            if field in output_schema["properties"]:
-                                output_schema["properties"][field].pop("default", None)
+                        # Require explicit nullable values on the wire, including nested plans/handoffs.
+                        def explicit_schema(node):
+                            if isinstance(node, dict):
+                                node.pop("default", None)
+                                if "properties" in node:
+                                    node["required"] = list(node["properties"])
+                                for value in node.values():
+                                    explicit_schema(value)
+                            elif isinstance(node, list):
+                                for value in node:
+                                    explicit_schema(value)
+                        explicit_schema(output_schema)
                         json.dump(output_schema, stream)
                     command = [
                         binary,

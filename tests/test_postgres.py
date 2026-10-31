@@ -1194,16 +1194,134 @@ def test_investigation_busy_and_invalid_output_do_not_change_daily(pg_setup):
     with Worker(settings,provider=FakeProvider()) as worker:worker.once()
     store=InvestigationStore(settings)
     job=store.enqueue(parent['report_id'],'default',None)
-    class Busy:
+    class Busy(GuideProvider):
         def analyze(self,request):raise ProviderError(ErrorKind.BUSY)
     result=run_once(settings,config,provider=Busy(),probes=lambda *args:[])
     assert result['status']=='PENDING' and result['attempt_count']==0
     assert store.db.execute('SELECT count(*) AS count FROM public.aiops_investigation_attempts').fetchone()['count']==0
     store.db.execute('UPDATE public.aiops_investigations SET available_at=now()')
-    class Bad:
+    class Bad(GuideProvider):
         def analyze(self,request):return guide('unknown-evidence')
     result=run_once(settings,config,provider=Bad(),probes=lambda *args:[])
     assert result['status']=='FAILED' and result['error']=='invalid_output'
     assert store.get(job['job_id'])['result'] is None
     assert store.parent(parent['report_id'])['status']=='COMPLETED'
+    store.close()
+
+
+def test_planned_probes_are_executed_and_audited_before_handoff(pg_setup,monkeypatch):
+    from test_investigation import GuideProvider, empty_plan
+    from aiops.investigation.service import run_once
+    from aiops.investigation.store import InvestigationStore
+
+    settings,service,config=pg_setup
+    parent=seed(service)
+    queue=JobQueue(settings);queue.enqueue(parent['report_id']);queue.close()
+    with Worker(settings,provider=FakeProvider()) as worker:worker.once()
+    store=InvestigationStore(settings)
+    job=store.enqueue(parent['report_id'],'default',None)
+    calls=[]
+    class Provider(GuideProvider):
+        def plan(self,request):
+            self.planning_input=json.loads(request.snapshot)
+            calls.append('plan')
+            return empty_plan([{'tool':'historical_logs','target':'fastapi','anchor':None,'reason':'과거 원인 확인'}])
+        def analyze(self,request):
+            snapshot=json.loads(request.snapshot)
+            assert snapshot['stage']=='operator_handoff'
+            assert snapshot['probe_execution'][0]['status']=='observed'
+            assert snapshot['observations'][0]['observation_id']=='extra-1'
+            calls.append('handoff')
+            result=super().analyze(request)
+            result.report.findings[0].evidence_ids.append('extra-1')
+            return result
+    def dispatch(*args):
+        calls.append('probe')
+        return {'events':[], 'scope':'test'}
+    monkeypatch.setattr('aiops.investigation.tools.dispatch',dispatch)
+    provider=Provider()
+    outcome=run_once(settings,config,provider=provider,probes=lambda *args:[])
+    assert outcome['status']=='COMPLETED' and calls==['plan','probe','handoff']
+    detail=store.get(job['job_id'])
+    assert detail['input']['planning_run']['job_id']=='plan-test'
+    assert detail['input']['investigation_plan']['requests'][0]['target']=='fastapi'
+    assert detail['result']['report']['operator_handoff']['first_actions']
+    attempts=store.db.execute('SELECT input_json FROM public.aiops_investigation_attempts').fetchone()
+    assert attempts['input_json']['probe_execution'][0]['probe']=='historical_logs'
+    store.close()
+
+
+def test_invalid_plan_executes_no_requested_probe_or_final_model(pg_setup,monkeypatch):
+    from test_investigation import GuideProvider, empty_plan
+    from aiops.investigation.service import run_once
+    from aiops.investigation.store import InvestigationStore
+    settings,service,config=pg_setup
+    parent=seed(service)
+    queue=JobQueue(settings);queue.enqueue(parent['report_id']);queue.close()
+    with Worker(settings,provider=FakeProvider()) as worker:worker.once()
+    store=InvestigationStore(settings);store.enqueue(parent['report_id'],'default',None)
+    def no_dispatch(*args):raise AssertionError('invalid plan must never execute')
+    monkeypatch.setattr('aiops.investigation.tools.dispatch',no_dispatch)
+    class Invalid(GuideProvider):
+        def plan(self,request):return empty_plan([
+            {'tool':'historical_logs','target':'fastapi','anchor':None,'reason':'valid first'},
+            {'tool':'recent_logs','target':'/etc/passwd','anchor':None,'reason':'invalid second'}])
+        def analyze(self,request):raise AssertionError('invalid plan must not reach handoff')
+    result=run_once(settings,config,provider=Invalid(),probes=lambda *args:[])
+    assert result['status']=='FAILED' and result['error']=='invalid_output'
+    assert store.parent(parent['report_id'])['status']=='COMPLETED'
+    store.close()
+
+
+def test_automatic_investigation_uses_two_isolated_codex_calls(pg_setup,monkeypatch):
+    import sys
+    from dataclasses import replace
+    from test_investigation import guide,empty_plan
+    from aiops.investigation.service import run_once
+    from aiops.investigation.store import InvestigationStore
+    settings,service,config=pg_setup
+    parent=seed(service)
+    queue=JobQueue(settings);queue.enqueue(parent['report_id']);queue.close()
+    with Worker(settings,provider=FakeProvider()) as worker:worker.once()
+    store=InvestigationStore(settings);job=store.enqueue(parent['report_id'],'default',None)
+    calls=[]
+    def fake_run(command,**kwargs):
+        schema=json.loads(Path(command[command.index('--output-schema')+1]).read_text())
+        assert command[command.index('--sandbox')+1]=='read-only'
+        assert 'AIOPS_DATABASE_URL' not in kwargs['env'] and 'PGPASSWORD' not in kwargs['env']
+        if 'requests' in schema['properties']:
+            assert schema['$defs']['ProbeRequest']['required']==['tool','target','anchor','reason']
+            payload=empty_plan().report.model_dump_json()
+            calls.append('plan')
+        else:
+            assert 'operator_handoff' in schema['required']
+            payload=guide(parent['report_id']).report.model_dump_json()
+            calls.append('handoff')
+        return 0,'\n'.join(json.dumps(e) for e in [
+            {'type':'thread.started','thread_id':'fake-'+calls[-1]},
+            {'type':'item.completed','item':{'type':'agent_message','text':payload}},
+            {'type':'turn.completed'}]),''
+    monkeypatch.setattr('aiops.providers.codex.run',fake_run)
+    result=run_once(replace(settings,codex_bin=sys.executable),config,probes=lambda *args:[])
+    assert result['status']=='COMPLETED' and calls==['plan','handoff']
+    stored=store.get(job['job_id'])
+    assert stored['input']['planning_run']['thread_id']=='fake-plan'
+    assert stored['result']['thread_id']=='fake-handoff'
+    store.close()
+
+
+def test_investigation_idempotency_is_scoped_to_policy_version(pg_setup,monkeypatch):
+    from aiops.investigation.store import InvestigationStore
+    settings,service,_=pg_setup
+    parent=seed(service)
+    queue=JobQueue(settings);queue.enqueue(parent['report_id']);queue.close()
+    with Worker(settings,provider=FakeProvider()) as worker:worker.once()
+    store=InvestigationStore(settings)
+    old=store.enqueue(parent['report_id'],'default',None)
+    assert store.enqueue(parent['report_id'],'default',None)['job_id']==old['job_id']
+    monkeypatch.setattr('aiops.investigation.store.POLICY_HASH','f'*64)
+    new=store.enqueue(parent['report_id'],'default',None)
+    assert new['job_id']!=old['job_id']
+    assert store.get(old['job_id'])['status']=='PENDING'
+    assert store.enqueue(parent['report_id'],'default',None)['job_id']==new['job_id']
     store.close()

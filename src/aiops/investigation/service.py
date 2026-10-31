@@ -1,10 +1,16 @@
-"""Explicit second stage: bounded probes, then one isolated Codex invocation."""
+"""Explicit second stage: bounded probes, typed model plan, additional probes, then operator handoff."""
 
 import json
+import time
 from dataclasses import replace
 from uuid import uuid4
 
-from aiops.investigation.models import INSTRUCTIONS, InvestigationReport, InvestigationResult
+from aiops.investigation.models import (
+    INSTRUCTIONS, PLANNING_INSTRUCTIONS, InvestigationReport, InvestigationResult,
+    PlanningReport, PlanningResult,
+)
+from aiops.collectors.config import load_config
+from aiops.investigation.tools import catalogue, execute_plan, validate_plan
 from aiops.investigation.probes import collect_observations
 from aiops.investigation.store import POLICY_HASH, InvestigationStore
 from aiops.providers.base import AnalysisRequest, ErrorKind, ProviderError
@@ -66,13 +72,38 @@ def validate_result(result, snapshot):
     result = InvestigationResult.model_validate(result.model_dump())
     if len(encoded(result.model_dump()).encode()) > 150000:
         raise ProviderError(ErrorKind.OUTPUT)
+    if result.report.operator_handoff is None:
+        raise ProviderError(ErrorKind.OUTPUT)
+    if any(response.expected_effect is None or response.side_effects is None or response.pre_checks is None
+           for issue in result.report.findings for response in issue.responses):
+        raise ProviderError(ErrorKind.OUTPUT)
     allowed = {snapshot['report_id'], *(o['observation_id'] for o in snapshot['observations'])}
-    if any(ref not in allowed for issue in result.report.findings for ref in issue.evidence_ids):
+    if result.report.operator_handoff.urgency == 'ACT_NOW':
+        current = {item['observation_id'] for item in snapshot['observations']
+                   if item.get('status') == 'observed' and item.get('probe') not in {'historical_logs'}}
+        if not any(ref in current for action in result.report.operator_handoff.first_actions for ref in action.evidence_ids):
+            raise ProviderError(ErrorKind.OUTPUT)
+    references = [ref for issue in result.report.findings for ref in issue.evidence_ids]
+    references += [ref for action in result.report.operator_handoff.first_actions for ref in action.evidence_ids]
+    if any(ref not in allowed for ref in references):
         raise ProviderError(ErrorKind.OUTPUT)
     return result
 
 
-def run_once(settings, sources_config, *, investigation_id=None, provider=None, probes=None):
+def bound_snapshot(snapshot, limit):
+    cap = min(limit, 90000)
+    if len(encoded(snapshot).encode()) > cap:
+        snapshot['limitations'].append('Input cap omitted historical examples or observation detail; omitted data is unknown, not healthy.')
+        while len(encoded(snapshot).encode()) > cap and snapshot.get('historical_examples'):
+            snapshot['historical_examples'].pop()
+        while len(encoded(snapshot).encode()) > cap and snapshot['observations']:
+            snapshot['observations'].pop()
+    if len(encoded(snapshot).encode()) > cap:
+        raise ProviderError(ErrorKind.CONFIG)
+    return snapshot
+
+
+def run_once(settings, sources_config, *, investigation_id=None, provider=None, planner=None, probes=None):
     worker_id = uuid4()
     with advisory_lock(settings, WORKER_LOCK) as guard:
         store = InvestigationStore(settings)
@@ -87,22 +118,65 @@ def run_once(settings, sources_config, *, investigation_id=None, provider=None, 
                 parent = store.parent(job['report_id'])
                 if not parent or parent['kind'] != 'daily' or parent['status'] != 'COMPLETED':
                     raise ProviderError(ErrorKind.CONFIG)
+                deadline = time.monotonic() + settings.timeout
+                def remaining():
+                    value = deadline - time.monotonic()
+                    if value <= 0:
+                        raise ProviderError(ErrorKind.TIMEOUT)
+                    return value
+
                 observations = (probes or collect_observations)(settings, sources_config)
+                config = load_config(sources_config)
+                catalog = catalogue(config)
                 snapshot = prepare_input(parent, observations, settings.max_input_bytes)
-                # Also mask legacy report text before it enters this new stage.
-                cleaner = PublicProgress(settings, lambda event: None)
+                # Also mask legacy report text before either model call or DB persistence.
+                sanitizer = PublicProgress(settings, lambda event: None)
                 def clean(item):
                     if isinstance(item, str):
-                        return cleaner.clean(item)
+                        return sanitizer.clean(item)
                     if isinstance(item, list):
                         return [clean(value) for value in item]
                     if isinstance(item, dict):
                         return {key: clean(value) for key, value in item.items()}
                     return item
-                snapshot = clean(snapshot)
+                source = parent['input_json']
+                if isinstance(source, str):
+                    source = json.loads(source)
+                snapshot['historical_examples'] = [
+                    {key: event.get(key) for key in ('event_id', 'timestamp', 'service', 'level', 'message')}
+                    for event in source.get('events', [])[:20]
+                ]
+                snapshot['tool_catalog'] = catalog
+                snapshot['stage'] = 'planning'
+                snapshot = bound_snapshot(clean(snapshot), settings.max_input_bytes)
                 store.save_input(job, worker_id, snapshot)
-                model = provider or CodexProvider(replace(settings, model=job['model']), instructions=INSTRUCTIONS,
-                    report_type=InvestigationReport, result_type=InvestigationResult)
+                # Test providers must explicitly supply a planner; never fall through to real AI.
+                plan_call = planner or (getattr(provider, 'plan', None) if provider is not None else None)
+                if provider is not None and plan_call is None:
+                    raise ProviderError(ErrorKind.CONFIG)
+                if plan_call is None:
+                    plan_call = CodexProvider(replace(settings, model=job['model'], timeout=min(120, remaining()/2)),
+                        instructions=PLANNING_INSTRUCTIONS, report_type=PlanningReport, result_type=PlanningResult).analyze
+                planned = validate_plan(plan_call(AnalysisRequest(encoded(snapshot))), catalog, parent)
+                # The entire request list is validated BEFORE any selected probe runs.
+                snapshot['investigation_plan'] = clean(planned.report.model_dump(mode='json'))
+                snapshot['planning_run'] = {'job_id': planned.job_id, 'provider': planned.provider,
+                                            'model': planned.model, 'thread_id': planned.thread_id}
+                snapshot['stage'] = 'additional_probes'
+                snapshot = bound_snapshot(clean(snapshot), settings.max_input_bytes)
+                store.save_input(job, worker_id, snapshot)
+                extra = execute_plan(planned, settings, config, parent, clean,
+                                     budget_seconds=min(20, remaining()))
+                snapshot['observations'] = extra + snapshot['observations']
+                snapshot['probe_execution'] = [
+                    {key: item[key] for key in ('observation_id', 'probe', 'service', 'status', 'started_at', 'finished_at')}
+                    for item in extra
+                ]
+                snapshot['stage'] = 'operator_handoff'
+                snapshot = bound_snapshot(snapshot, settings.max_input_bytes)
+                store.save_input(job, worker_id, snapshot)
+                model = provider or CodexProvider(replace(settings, model=job['model'], timeout=remaining()),
+                    instructions=INSTRUCTIONS, report_type=InvestigationReport, result_type=InvestigationResult)
                 result = validate_result(model.analyze(AnalysisRequest(encoded(snapshot))), snapshot)
                 # Model output may repeat probe/legacy secrets: mask again before storage.
                 result = InvestigationResult.model_validate(clean(result.model_dump()))
