@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 from psycopg.types.json import Jsonb
 
-from aiops.reporting.service import ReportingService
+from aiops.reporting.service import ReportingService, has_input
 from aiops.storage.postgres import connect, require_schema
 
 PRIORITIES = {"critical": 0, "high": 1, "normal": 2, "low": 3}
@@ -244,7 +244,7 @@ def submit(
         settings, sources_config=config, interval_minutes=interval_minutes
     ).execute(kind, date)
     snapshot = json.loads(Path(prepared["input"]).read_text())
-    if not snapshot.get("source_batch_count", 0) and not snapshot.get("daily_reports"):
+    if not has_input(snapshot):
         from aiops.operations import NoReportInput
 
         raise NoReportInput(

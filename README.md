@@ -140,6 +140,7 @@ AIOPS_API_TOKEN=<GENERATED_SECRET>
 | 설정                                              | 용도                                          |
 | ------------------------------------------------- | --------------------------------------------- |
 | `AIOPS_DATABASE_URL` · `PGPASSWORD`               | 보고서·작업 큐 DB 접속                        |
+| `AIOPS_METRICS_DATABASE_URL` | 선택 사항: 정기 응답시간 테이블이 있는 서비스 DB 읽기 접속 |
 | `AIOPS_SOURCES_CONFIG`                            | 수집 대상과 파일 경로 설정                    |
 | `AIOPS_DATA_DIR`                                  | 모든 실행에서 공유할 데이터 디렉터리          |
 | `AIOPS_API_TOKEN`                                 | Airflow·웹 서버가 API 호출 시 사용하는 비밀키 |
@@ -234,3 +235,5 @@ AIOPS_RUN_INTEGRATION=1 uv run pytest -q -m integration
 | [Phase 1](docs/PHASE1.md) · [Phase 2](docs/PHASE2.md) · [Phase 3](docs/PHASE3.md) | 설계와 개발 범위                     |
 
 관련 프로젝트: [Airflow](https://github.com/eft-library/eft-library-airflow), [Backend](https://github.com/eft-library/eft-library-back), [Frontend](https://github.com/eft-library/eft-library-front), [Kafka Consumers](https://github.com/eft-library/eft-library-kafka).
+
+서비스 DB의 `response_time`을 연결하면 일일 성능 분석에 5분 주기 `/health` 점검 통계를 포함합니다. UTC 시각을 KST 일일 범위로 조회하고, 저장된 초 단위를 밀리초로 변환합니다. [설정·측정 범위](docs/REPORTING.md#정기-서비스-응답-점검-db-연동)를 참고하세요.

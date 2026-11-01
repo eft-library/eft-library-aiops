@@ -90,11 +90,15 @@ def report_detail(settings, report_id):
     for metric in source.get("metrics", []):
         for evidence_id in metric.get("evidence_ids", []):
             evidence[evidence_id] = metric
+    for service in source.get("scheduled_health_probes", {}).get("services", []):
+        for evidence_id in service.get("evidence_ids", []):
+            evidence[evidence_id] = {**service, "unit": "ms", "scope": "Scheduled five-minute health probe, not all user requests."}
     for child in [*source.get("daily_reports", []), *source.get("weekly_context", [])]:
         evidence[child["report_id"]] = child
     return {
         **report_summary(row), "result": result, "investigations": investigations,
         "data_quality": source.get("data_quality", {}),
+        "scheduled_health_probes": source.get("scheduled_health_probes"),
         "totals": source.get("totals", source.get("observed_totals", {})),
         "source_batch_count": source.get("source_batch_count"),
         "input_limitations": source.get("limitations", []),

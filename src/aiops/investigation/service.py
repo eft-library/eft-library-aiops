@@ -34,6 +34,7 @@ def prepare_input(parent, observations, limit):
         'analysis_type': 'daily_investigation', 'report_id': parent['report_id'],
         'period': source.get('period'), 'historical_report': result['report'],
         'historical_data_quality': source.get('data_quality', {}),
+        'historical_scheduled_health_probes': source.get('scheduled_health_probes'),
         'observations': observations,
         'infrastructure_context': {
             'scope': 'EFT Library architecture reference, not runtime-verified health or connectivity. Use only configured observed service aliases; verify deployment identifiers before proposing commands.',

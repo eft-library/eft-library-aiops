@@ -15,6 +15,10 @@ adding their event/group counts again. Every section finding must cite supplied 
 Incident analysis: trace observed failures in timestamp order where available, distinguish
 repeated patterns and related services, discuss cause candidates, recovery evidence and
 user impact only when supported. Missing impact/recovery evidence must be explicit.
+scheduled_health_probes are sparse five-minute Airflow /health HTTPS checks, NOT all user
+requests. Use supplied milliseconds and counts; do not label their p95/p99 as user request
+percentiles or equate missing/NULL probes to HTTP status errors. response_ms source values
+were seconds, already converted to ms. Respect time ranges and measurement scope.
 Performance analysis: use supplied metric min/max/mean/sample counts and measured HTTP
 latency. Compare only compatible targets, units and intervals. No baseline, thresholds,
 percentiles, trend, throughput, error rate, database wait or Kafka lag may be invented.

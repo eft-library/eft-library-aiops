@@ -67,6 +67,13 @@ def fit_input(snapshot, limit):
     return snapshot
 
 
+def has_input(snapshot):
+    return bool(snapshot.get("source_batch_count") or snapshot.get("daily_reports") or any(
+        service.get("current", {}).get("measurements", 0)
+        for service in snapshot.get("scheduled_health_probes", {}).get("services", [])
+    ))
+
+
 def validate_references(result, snapshot):
     allowed = set()
 
@@ -97,6 +104,17 @@ def validate_references(result, snapshot):
         if section.status == "ISSUES_OBSERVED" and not section.findings:
             raise ProviderError(ErrorKind.OUTPUT)
         if section.status == "NO_ISSUES_OBSERVED":
+            probes = snapshot.get("scheduled_health_probes")
+            if section is result.report.performance_analysis and probes and (
+                probes.get("status") != "observed" or any(
+                    service["current"].get("samples", 0) < 2
+                    or service["current"].get("missing_slots", 0)
+                    or service["current"].get("failed_measurements", 0)
+                    or service["current"].get("invalid_measurements", 0)
+                    for service in probes.get("services", [])
+                )
+            ):
+                raise ProviderError(ErrorKind.OUTPUT)
             if not snapshot.get("data_quality", {}).get("complete"):
                 raise ProviderError(ErrorKind.OUTPUT)
             if snapshot.get("analysis_type") == "daily" and section is result.report.performance_analysis and not (
@@ -122,6 +140,8 @@ def validate_references(result, snapshot):
 
 
 def brief(row):
+    from aiops.reporting.health_metrics import health_brief
+
     result = json.loads(row["result_json"])["report"]
     source = json.loads(row["input_json"])
     if row["kind"] == "daily":
@@ -160,6 +180,7 @@ def brief(row):
             }
             for key in ("incident_analysis", "performance_analysis") if result.get(key)
         },
+        "scheduled_health_probes": health_brief(source.get("scheduled_health_probes")),
         "limitations": [value[:200] for value in result["limitations"][:3]],
     }
 
@@ -201,7 +222,10 @@ class ReportingService:
                     finally:
                         collection.close()
                 from aiops.providers.instructions import INSTRUCTIONS
+                from aiops.reporting.health_metrics import attach_health_metrics
 
+                if kind == "daily":
+                    attach_health_metrics(snapshot, manifest, self.settings, period)
                 manifest["analysis_policy"] = {
                     "provider": "codex-cli",
                     "model": self.settings.model,
@@ -223,9 +247,7 @@ class ReportingService:
                 )
                 analysis_reused = bool(analyze and row["status"] == "COMPLETED")
                 if analyze and row["status"] != "COMPLETED":
-                    if not snapshot.get("source_batch_count", 0) and not snapshot.get(
-                        "daily_reports"
-                    ):
+                    if not has_input(snapshot):
                         raise ValueError(
                             "no collected data or valid daily reports for analysis"
                         )

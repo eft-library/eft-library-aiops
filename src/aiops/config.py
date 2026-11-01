@@ -15,6 +15,8 @@ class Settings:
     model: str | None = None
     database_url: str | None = field(default=None, repr=False)
 
+    metrics_database_url: str | None = field(default=None, repr=False)
+
     @classmethod
     def from_env(cls) -> "Settings":
         settings = cls(
@@ -26,6 +28,7 @@ class Settings:
             max_input_bytes=int(os.getenv("AIOPS_MAX_INPUT_BYTES", "100000")),
             model=os.getenv("AIOPS_MODEL") or None,
             database_url=os.getenv("AIOPS_DATABASE_URL") or None,
+            metrics_database_url=os.getenv("AIOPS_METRICS_DATABASE_URL") or None,
         )
         if not math.isfinite(settings.timeout) or settings.timeout <= 0:
             raise ValueError("AIOPS_TIMEOUT_SECONDS must be finite and positive")

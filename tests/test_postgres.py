@@ -1325,3 +1325,60 @@ def test_investigation_idempotency_is_scoped_to_policy_version(pg_setup,monkeypa
     assert store.get(old['job_id'])['status']=='PENDING'
     assert store.enqueue(parent['report_id'],'default',None)['job_id']==new['job_id']
     store.close()
+
+
+def test_health_probe_utc_boundaries_seconds_percentiles_and_nulls(pg_setup):
+    from dataclasses import replace
+    from aiops.reporting.health_metrics import scheduled_health_metrics
+    from aiops.reporting.periods import for_period
+    settings,_,_=pg_setup
+    with psycopg.connect(settings.database_url,autocommit=True) as db:
+        db.execute('CREATE TABLE public.response_time(id serial primary key,service_name text,response_ms numeric,checked_time timestamptz)')
+        for name,value,stamp in [('FastAPI',.04,'2026-10-31T14:59:59Z'),('FastAPI',.1,'2026-10-31T15:00:00Z'),
+            ('FastAPI',.3,'2026-11-01T14:59:59Z'),('FastAPI',None,'2026-11-01T00:00:00Z'),
+            ('FastAPI',9,'2026-11-01T15:00:00Z'),('Next.js',.2,'2026-11-01T12:00:00+09:00')]:
+            db.execute('INSERT INTO public.response_time(service_name,response_ms,checked_time) VALUES (%s,%s,%s)',(name,value,stamp))
+    period=for_period('daily','2026-11-01',now=datetime(2026,11,2,tzinfo=SEOUL))
+    summary=scheduled_health_metrics(replace(settings,metrics_database_url=settings.database_url),period)
+    assert summary['status']=='observed'
+    api=summary['services'][0]['current']
+    assert api['samples']==2 and api['mean_ms']==200 and api['max_ms']==300
+    assert api['p95_ms']==pytest.approx(290) and api['p99_ms']==pytest.approx(298)
+    assert api['failed_measurements']==1 and api['missing_slots']==285
+    assert summary['services'][0]['previous_day']['mean_ms']==40
+    assert summary['services'][1]['current']['mean_ms']==200
+
+
+def test_health_metrics_refuse_naive_timestamp_without_guessing_timezone(pg_setup):
+    from dataclasses import replace
+    from aiops.reporting.health_metrics import scheduled_health_metrics
+    from aiops.reporting.periods import for_period
+    settings,_,_=pg_setup
+    with psycopg.connect(settings.database_url,autocommit=True) as db:
+        db.execute('CREATE TABLE public.response_time(service_name text,response_ms numeric,checked_time timestamp)')
+    period=for_period('daily','2026-11-01',now=datetime(2026,11,2,tzinfo=SEOUL))
+    assert scheduled_health_metrics(replace(settings,metrics_database_url=settings.database_url),period)['status']=='unavailable'
+
+
+def test_health_metrics_are_attached_to_daily_and_exposed_as_evidence(pg_setup):
+    from dataclasses import replace
+    from aiops.storage.views import report_detail
+    settings,service,config=pg_setup
+    with psycopg.connect(settings.database_url,autocommit=True) as db:
+        db.execute('CREATE TABLE public.response_time(service_name text,response_ms numeric,checked_time timestamptz)')
+        db.execute("INSERT INTO public.response_time VALUES ('FastAPI',.04,'2020-01-01T10:00:00+09:00')")
+    configured=replace(settings,metrics_database_url=settings.database_url)
+    source=ReportingService(configured,sources_config=config)
+    prepared=seed(source)
+    snapshot=json.loads(Path(prepared['input']).read_text())
+    assert snapshot['scheduled_health_probes']['services'][0]['current']['mean_ms']==40
+    assert snapshot['scheduled_health_probes']['services'][0]['hourly_kst'][0]['hour']==10
+    assert any(m['name']=='scheduled_health_response_time' for m in snapshot['metrics'])
+    detail=report_detail(configured,prepared['report_id'])
+    assert detail['scheduled_health_probes']['status']=='observed'
+    assert 'health-probe-fastapi-2020-01-01' in detail['evidence']
+    # A late measurement creates a new version on explicit preparation.
+    with psycopg.connect(settings.database_url,autocommit=True) as db:
+        db.execute("INSERT INTO public.response_time VALUES ('FastAPI',.08,'2020-01-01T10:05:00+09:00')")
+    again=source.execute('daily','2020-01-01')
+    assert again['report_id']!=prepared['report_id']
