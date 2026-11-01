@@ -158,15 +158,43 @@ async function reportsPage(query,ticket) {
  });bindCommon();bindPages();connection(true);
 }
 function metadata(entries) {return `<dl class="metadata">${entries.map(([label,value])=>`<div><dt>${esc(label)}</dt><dd>${value}</dd></div>`).join('')}</dl>`;}
+function evidenceBody(entry) {
+ if(!entry)return '원문은 이 보고서 입력에 포함되어 있지 않습니다.';
+ if(entry.message)return (entry.service?`[${entry.service}] `:'')+(entry.timestamp?stamp(entry.timestamp)+' KST\n':'')+entry.message;
+ if(entry.report_id)return entry.summary+'\n\n'+(entry.findings || []).map(finding=>typeof finding==='string'?finding:finding.issue).join('\n');
+ if(entry.samples!==undefined)return `${entry.service || ''} · ${entry.name || entry.metric || '시스템 지표'}\n표본 ${num(entry.samples)}개 · 최소 ${num(entry.min)} · 최대 ${num(entry.max)} · 평균 ${num(entry.mean)}`;
+ return JSON.stringify(entry,null,2);
+}
 function evidenceDisplay(id, data) {
- const entry=data.evidence?.[id];let body;
- if(!entry)body='원문은 이 보고서 입력에 포함되어 있지 않습니다.';
- else if(entry.message)body=(entry.service?`[${entry.service}] `:'')+(entry.timestamp?stamp(entry.timestamp)+'\n':'')+entry.message;
- else if(entry.report_id)body=entry.summary+'\n\n'+(entry.findings || []).map(finding=>typeof finding==='string'?finding:finding.issue).join('\n');
- else if(entry.samples!==undefined)body=`${entry.service || ''} · ${entry.name || entry.metric || '시스템 지표'}\n표본 ${num(entry.samples)}개 · 최소 ${num(entry.min)} · 최대 ${num(entry.max)} · 평균 ${num(entry.mean)}`;
- else body=JSON.stringify(entry,null,2);
+ const entry=data.evidence?.[id];
  const link=entry?.report_id?`<a class="text-link" href="${reportURL(entry.report_id)}">하위 보고서 보기 ${icon('arrow')}</a>`:'';
- return `<details class="evidence"><summary>${esc(id)}</summary><pre>${esc(body)}</pre>${link}</details>`;
+ return `<details class="evidence"><summary>${esc(id)}</summary><pre>${esc(evidenceBody(entry))}</pre>${link}</details>`;
+}
+function allEvidence(data) {
+ const entries=new Map(Object.entries(data.evidence || {}));
+ const report=data.result?.report;
+ for(const section of [report,report?.incident_analysis,report?.performance_analysis]){
+  for(const finding of section?.findings || [])for(const id of finding.evidence_ids || []){
+   if(!entries.has(id))entries.set(id,null);
+  }
+ }
+ const blocks=[];
+ if(entries.size){
+  blocks.push('=== 보고서 근거 ===');
+  for(const [id,entry] of entries){
+   const context=[entry?.file,entry?.timestamp].filter(Boolean).join(' · ');
+   blocks.push(`[${id}]${context?'\n'+context:''}\n${evidenceBody(entry)}`);
+  }
+ }
+ for(const item of data.investigations || []){
+  const observations=item.input?.observations || [];
+  if(!observations.length)continue;
+  blocks.push(`=== 심화 조사 근거 · ${item.investigation_id || item.job_id || item.started_at || '조사'} · ${stamp(item.started_at)} KST ===`);
+  for(const observation of observations){
+   blocks.push(`[${observation.observation_id}]\n${JSON.stringify(observation,null,2)}`);
+  }
+ }
+ return `<section class="panel all-evidence-panel" id="all-evidence"><div class="panel-heading"><h2>전체 근거 모아보기<span class="sub">이 보고서와 연결된 심화 조사에 포함된 근거입니다. 전체 원본 로그는 아닙니다.</span></h2></div>${blocks.length?`<details class="all-evidence"><summary>전체 근거 펼치기 · 한 번에 드래그해서 읽거나 복사할 수 있습니다</summary><pre tabindex="0" aria-label="전체 근거 텍스트">${esc(blocks.join('\n\n────────────────────────────────\n\n'))}</pre></details>`:empty('모아볼 근거가 없습니다','보고서 입력에 포함된 근거가 있으면 이곳에 표시합니다.')}</section>`;
 }
 function specialistSection(key,title,data) {
  const section=data.result?.report?.[key];
@@ -209,7 +237,7 @@ async function detailPage(id,ticket) {
  const ratio=expected?Math.min(100,Math.max(0,Number(observed || 0)/Number(expected)*100)):0;
  const childIds=Object.values(data.lineage?.daily_report_ids || {});
  content.innerHTML=`<a class="back-link" href="#reports">${icon('arrow')}보고서 목록으로</a>`+head(`${kinds[data.kind] || ''} 분석 보고서`,`${period(data)} · ${data.report_id}`,'REPORT DETAILS',`<span class="date-chip">${badge(data.status)}</span>`)+`
- <div class="report-navigation" role="navigation" aria-label="보고서 구역"><span>보고서 탐색</span><button type="button" data-section="report-overview">종합 요약</button>${daily?'<button type="button" data-section="incident_analysis">장애 분석</button><button type="button" data-section="performance_analysis">성능 분석</button><button type="button" data-section="investigation">심화 조사</button>':''}<button type="button" data-section="report-limitations">분석 한계</button></div>
+ <div class="report-navigation" role="navigation" aria-label="보고서 구역"><span>보고서 탐색</span><button type="button" data-section="report-overview">종합 요약</button>${daily?'<button type="button" data-section="incident_analysis">장애 분석</button><button type="button" data-section="performance_analysis">성능 분석</button><button type="button" data-section="investigation">심화 조사</button>':''}<button type="button" data-section="report-limitations">분석 한계</button><button type="button" data-section="all-evidence">전체 근거</button></div>
  <div class="detail-layout"><div class="detail-main"><section class="panel detail-summary" id="report-overview"><div class="detail-period">${esc(period(data))} <span class="muted">· Asia/Seoul</span></div><h2>분석 요약</h2>${badge(report?.severity)}<p>${esc(report?.summary || (data.status==='FAILED'?'분석을 완료하지 못했습니다. 작업 현황에서 오류를 확인하세요.':'아직 완료된 분석 결과가 없습니다.'))}</p></section>
  <section class="panel"><div class="panel-heading"><h2>주요 발견 사항<span class="sub">${num(report?.findings?.length || 0)}개의 항목 · 관측 사실과 가설을 구분해 확인하세요.</span></h2></div>${report?.findings?.length?report.findings.map((finding,index)=>`<article class="finding"><div class="finding-head"><span class="finding-index">${String(index+1).padStart(2,'0')}</span><h3>${esc(finding.issue)}</h3></div><div class="finding-body"><h4>원인 가설</h4><p>${esc(finding.hypothesis)}</p><h4>확인 권고</h4><ul>${finding.recommended_checks.map(check=>`<li>${esc(check)}</li>`).join('')}</ul><h4>분석 근거 · 펼쳐서 보기</h4>${finding.evidence_ids.map(eid=>evidenceDisplay(eid,data)).join('')}</div></article>`).join(''):empty('표시할 발견 사항이 없습니다','분석 결과가 생성되면 근거와 함께 확인할 수 있습니다.')}</section>
  ${daily?specialistSection('incident_analysis','장애 분석',data)+specialistSection('performance_analysis','성능 분석',data)+investigationSection(data):''}
@@ -217,7 +245,7 @@ async function detailPage(id,ticket) {
  <aside class="detail-side"><section class="panel"><h3>보고서 정보</h3>${metadata([['분석 유형',esc(kinds[data.kind])],['수정 버전',`v${String(data.revision).padStart(4,'0')}`],['생성 시각',esc(stamp(data.created_at))],['완료 시각',esc(stamp(data.completed_at))],['분석 모델',esc(data.result?.model || '—')],['자동 변경',data.result?'수행하지 않음':'—'],['관측 이벤트',num(data.totals?.events)+'건'],...(data.error?[['오류',`<span class="error-code">${esc(data.error)}</span>`]]:[])])}</section>
  <section class="panel"><h3>데이터 수집 품질</h3>${badge(data.coverage_complete?'collected':qualitySummary(data).attention?'partial':'continuing',qualityText(data))}<div class="progress-track"><div class="progress-fill" style="width:${ratio}%"></div></div><div class="coverage-label"><span>${daily?'수집 실행 구간':'완료된 일일 보고서'}</span><span>${num(observed)} / ${num(expected)}</span></div><div class="quality-grid"><div class="quality-metric"><strong>${num(daily?data.source_batch_count:quality.missing_dates?.length)}</strong>${daily?'입력 배치':'누락 날짜'}</div><div class="quality-metric"><strong>${num(daily?quality.unclassified_level_events:quality.incomplete_daily_reports?.length)}</strong>${daily?'미분류 이벤트':'불완전 일일'}</div><div class="quality-metric"><strong>${num(daily?quality.encoding_error_events:quality.outdated_report_ids?.length)}</strong>${daily?'인코딩 오류':'오래된 일일'}</div></div><p class="service-message">${esc(qualitySummary(data).detail)}</p>${daily?qualityDetails(data):''}</section>
  ${childIds.length?`<section class="panel"><h3>입력 일일 보고서</h3><div class="history-list">${childIds.map(child=>`<a href="${reportURL(child)}">${esc(child)}</a>`).join('')}</div></section>`:''}
- </aside></div>`;bindCommon();connection(true);
+ </aside></div>${allEvidence(data)}`;bindCommon();connection(true);
 }
 async function collectionPage(query,ticket) {
  const params=new URLSearchParams(query);params.set('page_size','12');
