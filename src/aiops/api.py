@@ -101,6 +101,31 @@ def create_app(settings, *, token: str, sources_config: Path, provider=None, inv
     for kind in (OSError, ValueError, sqlite3.Error):
         app.add_exception_handler(kind, configuration_error)
 
+    from aiops.live_logs import LogViewer
+    viewer = LogViewer(settings, sources_config, token)
+
+    @app.get("/v1/logs/services")
+    def log_services():
+        return viewer.services()
+
+    @app.get("/v1/logs/files")
+    def log_files(service: str = Query(min_length=1, max_length=64)):
+        try:
+            return viewer.listing(service)
+        except (OSError, ValueError):
+            raise HTTPException(status_code=404, detail="logs_unavailable") from None
+
+    @app.get("/v1/logs/tail")
+    def log_tail(service: str = Query(min_length=1, max_length=64),
+                 file_id: str | None = Query(default=None, pattern=r"^[a-f0-9]{32}$"),
+                 cursor: str | None = Query(default=None, max_length=1024)):
+        try:
+            return viewer.read(service, file_id, cursor)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="invalid_log_request") from None
+        except OSError:
+            raise HTTPException(status_code=404, detail="logs_unavailable") from None
+
     @app.get("/v1/status")
     def overview():
         return status(settings)

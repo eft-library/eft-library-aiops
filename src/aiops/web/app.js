@@ -78,6 +78,7 @@ async function api(path) {
  const controller = new AbortController(); const timer=setTimeout(()=>controller.abort(),12000);
  try {
   const response=await fetch('/read/'+path, {signal:controller.signal,cache:'no-store'});
+  if(response.status===401){const data=await response.clone().json().catch(()=>({}));if(data.error==='login_required'){stopLiveLogs();location.replace('/login'+location.hash);throw new Error('login_required');}}
   if (!response.ok) { let code; try { code=(await response.json()).error; } catch { code='api_unavailable'; } throw new Error(code); }
   return await response.json();
  } finally { clearTimeout(timer); }
@@ -277,10 +278,47 @@ function bindCommon(){
  }));
 }
 function showToast(text){const toast=document.getElementById('toast');toast.textContent=text;toast.hidden=false;setTimeout(()=>toast.hidden=true,3500);}
+let stopLiveLogs=()=>{};
+async function logsPage(ticket) {
+ const data=await api('logs/services');if(ticket!==revision)return;
+ content.innerHTML=head('서비스 로그','설정된 서비스 로그를 조회합니다. 5분 수집·분석과 별도로 동작합니다.','SERVICE LOGS')+`<section class="panel live-logs"><form class="filterbar" id="log-controls"><label class="field"><span>서비스</span><select id="log-service">${data.items.map(row=>`<option value="${esc(row.service)}">${esc(row.service)}</option>`).join('')}</select></label><label class="field"><span>로그 파일</span><select id="log-file"><option value="">최근 활성 로그 자동</option></select></label><label class="field"><span>검색</span><input id="log-search" type="search" placeholder="현재 표시 기록에서 검색"></label><label class="field"><span>로그 수준</span><select id="log-level"><option value="">전체</option>${['ERROR','WARNING','INFO','DEBUG','UNKNOWN'].map(level=>`<option>${level}</option>`).join('')}</select></label><label class="checkbox"><input id="log-scroll" type="checkbox" checked>자동 스크롤</label><button class="button" type="button" id="log-pause">일시정지</button></form><div class="log-status" id="log-status" role="status">로그 연결 준비 중</div><p class="log-scope">최대 1,000줄을 표시합니다. 검색·수준 필터는 현재 표시 기록에만 적용됩니다. 파일 목록·최근 기록 조회는 범위가 제한되며 전체 보관 로그가 아닙니다.</p><pre class="log-output" id="log-output" tabindex="0" aria-label="서비스 실시간 로그"></pre></section>`;
+ if(!data.items.length){document.getElementById('log-status').textContent='활성화된 파일 로그 수집 대상이 없습니다.';return;}
+ const service=document.getElementById('log-service'),file=document.getElementById('log-file'),search=document.getElementById('log-search'),level=document.getElementById('log-level'),scroll=document.getElementById('log-scroll'),pause=document.getElementById('log-pause'),status=document.getElementById('log-status'),output=document.getElementById('log-output');
+ let source=null,timer=null,cursor='',rows=[],paused=false,disposed=false,selection=0;
+ const noticeLabels={active_file_changed:'새 활성 로그 파일로 전환했습니다',file_rewritten:'파일 재작성을 감지해 최근 기록부터 표시합니다',file_rotated_or_truncated:'로그 교체·축소를 감지해 최근 기록부터 표시합니다',oversized_line_skipped:'크기 제한을 넘는 기록을 생략했습니다',display_limit_older_lines_omitted:'표시 한도로 일부 이전 기록을 생략했습니다'};
+ function draw(){const query=search.value.toLowerCase();output.textContent=rows.filter(row=>(!level.value||row.level===level.value)&&(!query||row.text.toLowerCase().includes(query))).map(row=>row.text).join('\n');if(scroll.checked)output.scrollTop=output.scrollHeight;}
+ function disconnect(){if(source)source.close();source=null;clearTimeout(timer);}
+ function connect(){
+  if(disposed||paused)return;
+  disconnect();const params=new URLSearchParams({service:service.value});if(file.value)params.set('file_id',file.value);if(cursor)params.set('cursor',cursor);
+  status.textContent='로그 연결 중';source=new EventSource('/logs/stream?'+params);
+  source.onmessage=event=>{if(disposed)return;let payload;try{payload=JSON.parse(event.data);}catch{return;}
+   if(payload.event==='error'){status.textContent='로그를 조회하지 못했습니다. 파일 선택·수집 경로·권한을 확인하세요.';disconnect();return;}
+   cursor=payload.cursor;rows.push(...payload.entries);if(rows.length>1000)rows=rows.slice(-1000);draw();
+   const notices=(payload.notices || []).map(name=>noticeLabels[name] || '조회 범위 참고 사항');
+   status.textContent='실시간 연결 · '+num(rows.length)+'줄'+(notices.length?' · '+notices.join(' · '):'');connection(true);
+  };
+  source.onerror=()=>{disconnect();if(disposed||paused)return;status.textContent='연결을 다시 확인하고 있습니다';timer=setTimeout(async()=>{try{await api('logs/services');if(!disposed&&!paused)connect();}catch{if(!disposed)status.textContent='연결할 수 없습니다. 다시 조회하거나 로그인 상태를 확인하세요.';}},3000);};
+ }
+ async function chooseService(){
+  disconnect();cursor='';rows=[];draw();const current=++selection;status.textContent='로그 파일 조회 중';
+  try{const listing=await api('logs/files?'+new URLSearchParams({service:service.value}));if(disposed||current!==selection)return;
+   file.innerHTML='<option value="">최근 활성 로그 자동</option>'+listing.items.map(item=>`<option value="${esc(item.file_id)}">${esc(item.label)} · ${esc(stamp(new Date(item.modified_at*1000).toISOString()))}</option>`).join('');
+   if(!listing.items.length){status.textContent='설정된 경로에서 조회 가능한 로그 파일이 없습니다.';return;}
+   if(listing.limited)status.textContent='탐색 한도 내 최근 파일만 표시합니다';connect();
+  }catch{if(!disposed)status.textContent='로그 파일 목록을 조회하지 못했습니다.';}
+ }
+ service.addEventListener('change',chooseService);file.addEventListener('change',()=>{disconnect();cursor='';rows=[];draw();connect();});
+ search.addEventListener('input',draw);level.addEventListener('change',draw);scroll.addEventListener('change',draw);
+ pause.addEventListener('click',()=>{paused=!paused;pause.textContent=paused?'다시 연결':'일시정지';if(paused){disconnect();status.textContent='일시정지 · 다시 연결하면 제한된 범위에서 이어 읽습니다';}else connect();});
+ document.getElementById('log-controls').addEventListener('submit',event=>event.preventDefault());
+ stopLiveLogs=()=>{disposed=true;disconnect();};await chooseService();bindCommon();
+}
 async function render(){
+ stopLiveLogs();
  const ticket=++revision;const [route,query='']=(location.hash.slice(1)||'dashboard').split('?');const tab=route.startsWith('report/')?'reports':route;
  state.tab=tab;
- const nav=[['dashboard','대시보드'],['reports','분석 보고서'],['collections','수집 현황'],['jobs','작업 현황']];
+ const nav=[['dashboard','대시보드'],['reports','분석 보고서'],['collections','수집 현황'],['jobs','작업 현황'],['logs','서비스 로그']];
  document.getElementById('navigation').innerHTML=nav.map(([key,label])=>`<a href="#${key}" title="${label}" class="${tab===key?'active':''}" ${tab===key?'aria-current="page"':''}>${icon(key)}<span>${label}</span>${tab===key?'<span class="nav-arrow">›</span>':''}</a>`).join('');
  document.getElementById('breadcrumb').textContent=nav.find(([key])=>key===tab)?.[1] || '대시보드';
  content.innerHTML='<div class="loading"><span class="spinner"></span>운영 데이터를 불러오는 중입니다.</div>';
@@ -289,6 +327,7 @@ async function render(){
   else if(tab==='reports')await reportsPage(query,ticket);
   else if(tab==='collections')await collectionPage(query,ticket);
   else if(tab==='jobs')await jobsPage(query,ticket);
+  else if(tab==='logs')await logsPage(ticket);
   else await dashboard(ticket);
   if(ticket!==revision)return;
   document.getElementById('updated').textContent='마지막 조회 '+stamp(new Date().toISOString())+' KST';
@@ -301,3 +340,6 @@ async function render(){
 }
 window.addEventListener('hashchange',()=>{window.scrollTo(0,0);render();});
 render();
+
+document.getElementById('logout')?.addEventListener('click',async()=>{stopLiveLogs();try{await fetch('/auth/logout',{method:'POST',headers:{'X-AIOps-Web':'1'}});}finally{location.replace('/login');}});
+window.addEventListener('pagehide',()=>stopLiveLogs());

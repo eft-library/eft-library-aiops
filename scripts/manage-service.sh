@@ -87,6 +87,12 @@ if action == 'status':
     print(f'실행 중: PID {pid}, 포트 {port}, 로그 폴더 {log_directory}' if pid else '중지 상태 (이 스크립트가 관리하는 프로세스 없음)')
     sys.exit(0 if pid else 1)
 if action == 'restart':
+    if service == 'web':
+        from aiops.web_auth import WebAuth
+        try:
+            WebAuth(os.getenv('AIOPS_WEB_USERNAME',''), os.getenv('AIOPS_WEB_PASSWORD',''), os.getenv('AIOPS_WEB_SESSION_SECRET',''))
+        except ValueError:
+            sys.exit('웹 로그인 계정과 32자 이상의 AIOPS_WEB_SESSION_SECRET을 .env에 설정해 주세요.')
     # Validate before stopping a working API; never source .env as shell code.
     if not os.getenv('AIOPS_API_TOKEN') or (service == 'api' and not os.getenv('AIOPS_DATABASE_URL')):
         sys.exit('.env의 AIOPS_API_TOKEN 및 DB 설정을 확인해 주세요.')

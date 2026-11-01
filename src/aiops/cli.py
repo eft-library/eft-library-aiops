@@ -171,6 +171,10 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
                 app = create_web_app(
                     api_url=os.getenv("AIOPS_WEB_API_URL", "http://127.0.0.1:9023"),
                     token=os.getenv("AIOPS_API_TOKEN", ""),
+                    username=os.getenv("AIOPS_WEB_USERNAME", ""),
+                    password=os.getenv("AIOPS_WEB_PASSWORD", ""),
+                    session_secret=os.getenv("AIOPS_WEB_SESSION_SECRET", ""),
+                    cookie_secure=os.getenv("AIOPS_WEB_COOKIE_SECURE", "false").lower() == "true",
                 )
                 uvicorn.run(app, host=args.host, port=args.port, workers=1)
             return 0
