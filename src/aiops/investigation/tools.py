@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import sqlite3
 import time
 from collections import Counter
 from datetime import datetime, timedelta
@@ -102,11 +103,39 @@ def historical_logs(settings, parent, target, anchor):
         start, end = max(start, anchor - timedelta(minutes=15)), min(end, anchor + timedelta(minutes=15))
     deadline, budget = time.monotonic() + 3, 2 * 1024 * 1024
     events, scanned, files, omitted, unavailable = [], 0, 0, 0, 0
-    batch_ids, excluded, unknown = historical_batches(
-        settings, manifest.get('batch_ids', []), start, end, min(deadline, time.monotonic() + .5))
+    from aiops.collectors.event_index import event_offsets
+
+    batch_ids = manifest.get('batch_ids', [])
+    for batch_id in batch_ids:
+        if not isinstance(batch_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', batch_id):
+            raise ValueError('invalid stored batch id')
+    plans, legacy = [], []
+    excluded, indexed, index_invalid = 0, 0, 0
+    selection_deadline = min(deadline, time.monotonic() + 1)
+    for batch_id in batch_ids:
+        if time.monotonic() >= selection_deadline:
+            legacy.append(batch_id)
+            continue
+        try:
+            offsets, invalid = event_offsets(
+                settings.data_dir / 'collection' / 'batches' / batch_id,
+                target, start, end, selection_deadline)
+            indexed += 1
+            index_invalid += invalid
+            if offsets:
+                plans.append((batch_id, offsets))
+            else:
+                excluded += 1
+        except (OSError, ValueError, TypeError, sqlite3.Error):
+            legacy.append(batch_id)
+    legacy, legacy_excluded, unknown = historical_batches(
+        settings, legacy, start, end, min(deadline, time.monotonic() + .25))
+    excluded += legacy_excluded
+    missing_indexes = len(batch_ids) - indexed
+    plans.extend((batch_id, None) for batch_id in legacy)
     scanned_start = scanned_end = None
     exhausted = False
-    for batch_id in batch_ids:
+    for batch_id, offsets in plans:
         if files >= 100 or budget <= 0 or time.monotonic() >= deadline or len(events) >= 40:
             exhausted = True
             break
@@ -117,8 +146,18 @@ def historical_logs(settings, parent, target, anchor):
         try:
             descriptor = open_regular(path)
             with os.fdopen(descriptor, 'rb') as stream:
+                positions = iter(offsets) if offsets is not None else None
                 while budget > 0 and time.monotonic() < deadline and len(events) < 40:
-                    line = stream.readline(min(65537, budget))
+                    length = 65537
+                    if positions is not None:
+                        position = next(positions, None)
+                        if position is None:
+                            break
+                        offset, length = position
+                        if offset < 0 or length <= 0 or offset + length > os.fstat(stream.fileno()).st_size:
+                            raise ValueError('invalid indexed position')
+                        stream.seek(offset)
+                    line = stream.readline(min(65537, length, budget))
                     budget -= len(line)
                     if not line:
                         break
@@ -148,13 +187,15 @@ def historical_logs(settings, parent, target, anchor):
             unavailable += 1
     return {'events': events, 'scanned_records': scanned, 'files_checked': files,
             'unavailable_files': unavailable, 'omitted_records': omitted,
-            'truncated': exhausted or len(batch_ids) > files,
+            'truncated': exhausted or len(plans) > files,
             'window_start': start.isoformat(), 'window_end': end.isoformat(),
             'excluded_batches': excluded, 'unknown_range_batches': unknown,
+            'indexed_batches': indexed, 'unindexed_batches': missing_indexes,
+            'index_omitted_records': index_invalid,
             'scanned_event_start': scanned_start.isoformat() if scanned_start else None,
             'scanned_event_end': scanned_end.isoformat() if scanned_end else None,
-            'stop_reason': 'scan_limit' if exhausted or len(batch_ids) > files else 'eligible_batches_exhausted',
-            'scope': 'Bounded sample of stored historical logs. Empty results do not prove no errors; older files may be omitted by limits. Window end exclusive.'}
+            'stop_reason': 'scan_limit' if exhausted or len(plans) > files else 'eligible_batches_exhausted',
+            'scope': 'Indexed service/time lookup with bounded legacy fallback. Bounded sample of stored historical logs. Empty results do not prove no errors; older files may be omitted by limits. Window end exclusive.'}
 
 
 def process_summary():
@@ -221,7 +262,7 @@ def execute_plan(plan, settings, config, parent, cleaner, *, budget_seconds=20):
                             data[field].pop()
                     if len(json.dumps(data, ensure_ascii=False, default=str).encode()) > 12000:
                         data = {'truncated': True, 'reason': 'probe_output_cap', 'scope': 'Output exceeded 12KB; no health conclusion may be drawn.'}
-                partial = any(data.get(key) for key in ('failures', 'truncated', 'omitted_records', 'unavailable_files', 'inaccessible_processes'))
+                partial = any(data.get(key) for key in ('failures', 'truncated', 'omitted_records', 'unavailable_files', 'inaccessible_processes', 'index_omitted_records'))
                 status = 'partial' if partial else 'observed'
             except (OSError, ValueError, ProviderError, psycopg.Error, psutil.Error):
                 data, status = {'reason': 'probe_unavailable'}, 'unavailable'

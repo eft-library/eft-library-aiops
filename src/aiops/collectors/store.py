@@ -137,6 +137,9 @@ class BatchStore:
                 stream.write(data)
                 stream.flush()
                 os.fsync(stream.fileno())
+        from aiops.collectors.event_index import build_event_index
+
+        build_event_index(stage)
         fsync_dir(stage)
         fsync_dir(self.staging)
         if before_commit:

@@ -42,6 +42,7 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
     web.add_argument("--port", type=int, default=4003)
     web.add_argument("--log-dir", type=Path, help="Daily web logs in Asia/Seoul")
     commands.add_parser("setup", help="Initialize DB and register existing local data")
+    commands.add_parser("index-logs", help="Build event-time indexes for existing stored logs")
     commands.add_parser("status", help="Show collection, database and recent jobs")
     commands.add_parser("doctor", help="Check local Python, Codex and login status")
     analyze = commands.add_parser(
@@ -182,6 +183,18 @@ def main(argv=None, *, provider: AIProvider | None = None) -> int:
             from aiops.operations import setup
 
             output = setup(settings)
+        elif args.command == "index-logs":
+            from aiops.collectors.event_index import build_event_index
+            from aiops.collectors.store import collector_lock
+
+            root = settings.data_dir / 'collection'
+            count = 0
+            with collector_lock(root):
+                for folder in sorted((root / 'batches').iterdir()):
+                    if folder.is_dir() and not folder.is_symlink() and (folder / 'events.jsonl').is_file():
+                        build_event_index(folder)
+                        count += 1
+            output = {'indexed_batches': count}
         elif args.command == "status":
             from aiops.operations import status
 

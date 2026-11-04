@@ -273,3 +273,70 @@ def test_recent_log_selects_newest_modified_file(tmp_path):
     assert result['selected_file'] == 'new.log'
     assert result['file_modified_at'] == '1970-01-01T00:33:20+00:00'
     assert result['truncated'] is False
+
+
+def test_index_seeks_past_large_unordered_history_and_other_services(tmp_path):
+    from datetime import datetime
+    from aiops.collectors.event_index import build_event_index
+    from aiops.investigation.tools import historical_logs
+
+    folder = tmp_path / 'collection' / 'batches' / 'batch-indexed'
+    folder.mkdir(parents=True)
+    old = {'timestamp': '2026-08-01T00:00:00Z', 'service': 'airflow', 'message': 'x' * 1000}
+    wanted = {'timestamp': '2020-01-01T01:00:00Z', 'service': 'fastapi', 'message': 'wanted'}
+    # The requested record follows >2MiB of unrelated data; times are unordered.
+    raw = (json.dumps(old) + '\n') * 3000 + json.dumps(wanted) + '\n'
+    (folder / 'events.jsonl').write_text(raw)
+    (folder / 'snapshot.json').write_text('x' * 300000)
+    build_event_index(folder)
+    parent = daily_parent()
+    parent['manifest_json'] = {'batch_ids': ['batch-indexed']}
+    result = historical_logs(Settings(data_dir=tmp_path), parent, 'fastapi',
+                             datetime.fromisoformat('2020-01-01T10:00:00+09:00'))
+    assert [event['message'] for event in result['events']] == ['wanted']
+    assert result['scanned_records'] == 1
+    assert result['indexed_batches'] == 1
+    assert result['unindexed_batches'] == 0
+    assert result['truncated'] is False
+    assert (folder / 'events.jsonl').read_text() == raw
+
+
+def test_event_index_detects_stale_data_and_can_rebuild(tmp_path):
+    from datetime import datetime, timezone
+    from aiops.collectors.event_index import build_event_index, event_offsets
+    import time
+
+    path = tmp_path / 'events.jsonl'
+    path.write_text(json.dumps({'timestamp': '2020-01-01T01:00:00Z', 'service': 'fastapi'}) + '\n')
+    build_event_index(tmp_path)
+    start = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    end = datetime(2020, 1, 2, tzinfo=timezone.utc)
+    rows, invalid = event_offsets(tmp_path, 'fastapi', start, end, time.monotonic() + 1)
+    assert rows == [(0, path.stat().st_size)]
+    assert invalid == 0
+    path.write_text(path.read_text() + 'invalid\n')
+    with pytest.raises(ValueError, match='stale'):
+        event_offsets(tmp_path, 'fastapi', start, end, time.monotonic() + 1)
+    build_event_index(tmp_path)
+    assert event_offsets(tmp_path, 'fastapi', start, end, time.monotonic() + 1)[1] == 1
+
+
+def test_indexed_query_respects_event_cap_and_exclusive_end(tmp_path):
+    from datetime import datetime
+    from aiops.collectors.event_index import build_event_index
+    from aiops.investigation.tools import historical_logs
+
+    folder = tmp_path / 'collection' / 'batches' / 'batch-cap'
+    folder.mkdir(parents=True)
+    records = [{'timestamp': '2020-01-01T10:00:00+09:00', 'service': 'fastapi', 'message': str(i)}
+               for i in range(45)]
+    records.append({'timestamp': '2020-01-01T10:15:00+09:00', 'service': 'fastapi', 'message': 'excluded'})
+    (folder / 'events.jsonl').write_text(''.join(json.dumps(item) + '\n' for item in records))
+    build_event_index(folder)
+    parent = daily_parent()
+    parent['manifest_json'] = {'batch_ids': ['batch-cap']}
+    result = historical_logs(Settings(data_dir=tmp_path), parent, 'fastapi',
+                             datetime.fromisoformat('2020-01-01T10:00:00+09:00'))
+    assert len(result['events']) == 40
+    assert result['truncated'] is True
+    assert all(event['message'] != 'excluded' for event in result['events'])
