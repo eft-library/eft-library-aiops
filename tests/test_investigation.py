@@ -233,3 +233,43 @@ def test_handoff_and_response_effects_required_for_new_outputs():
     # Stored legacy results still parse and can be displayed.
     legacy=guide().model_dump();legacy['report'].pop('operator_handoff')
     assert InvestigationResult.model_validate(legacy).report.operator_handoff is None
+
+
+def test_historical_prioritizes_window_before_event_budget(tmp_path):
+    from datetime import datetime
+    from aiops.investigation.tools import historical_logs
+    parent = daily_parent()
+    parent['manifest_json'] = {'batch_ids': ['batch-old', 'batch-wanted', 'batch-legacy']}
+    for name, stamp in [('old', '2020-01-01T01:00:00+09:00'),
+                        ('wanted', '2020-01-01T10:00:00+09:00')]:
+        folder = tmp_path / 'collection' / 'batches' / ('batch-' + name)
+        folder.mkdir(parents=True)
+        (folder / 'snapshot.json').write_text(json.dumps({'time_range': {'start': stamp, 'end': stamp}}))
+        event = {'timestamp': stamp, 'service': 'fastapi', 'message': name}
+        line = json.dumps(event) + '\n'
+        (folder / 'events.jsonl').write_text(line * (40000 if name == 'old' else 1))
+    legacy = tmp_path / 'collection' / 'batches' / 'batch-legacy'
+    legacy.mkdir()
+    (legacy / 'events.jsonl').write_text(json.dumps({
+        'timestamp': '2020-01-01T10:01:00+09:00', 'service': 'fastapi', 'message': 'legacy'}) + '\n')
+    result = historical_logs(Settings(data_dir=tmp_path), parent, 'fastapi',
+                             datetime.fromisoformat('2020-01-01T10:00:00+09:00'))
+    assert [event['message'] for event in result['events']] == ['wanted', 'legacy']
+    assert result['excluded_batches'] == 1
+    assert result['unknown_range_batches'] == 1
+    assert result['scanned_records'] == 2
+    assert result['truncated'] is False
+    assert result['scanned_event_end'] == '2020-01-01T10:01:00+09:00'
+
+
+def test_recent_log_selects_newest_modified_file(tmp_path):
+    import os
+    (tmp_path / 'old.log').write_text('old\n')
+    (tmp_path / 'new.log').write_text('new\n')
+    os.utime(tmp_path / 'old.log', (1000, 1000))
+    os.utime(tmp_path / 'new.log', (2000, 2000))
+    result = log_excerpt(Source(type='directory', path=tmp_path))
+    assert result['text'] == 'new'
+    assert result['selected_file'] == 'new.log'
+    assert result['file_modified_at'] == '1970-01-01T00:33:20+00:00'
+    assert result['truncated'] is False

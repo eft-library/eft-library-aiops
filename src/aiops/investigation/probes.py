@@ -43,6 +43,7 @@ def open_regular(path):
 def log_excerpt(source):
     # Scan only a bounded portion. This is explicitly NOT historical recovery.
     candidates, scanned = [], 0
+    limited = False
     deadline = time.monotonic() + 1
     if source.type == "file":
         candidates = [source.path]
@@ -56,6 +57,7 @@ def log_excerpt(source):
                 for entry in entries:
                     scanned += 1
                     if scanned > 256 or time.monotonic() >= deadline:
+                        limited = True
                         break
                     if entry.is_symlink():
                         continue
@@ -63,12 +65,14 @@ def log_excerpt(source):
                         pending.append(Path(entry.path))
                     elif entry.is_file(follow_symlinks=False) and fnmatch.fnmatch(entry.name, source.pattern) and not entry.name.endswith('.gz'):
                         candidates.append(Path(entry.path))
+        limited = limited or bool(pending)
         candidates.sort(key=lambda path: path.stat(follow_symlinks=False).st_mtime, reverse=True)
     if not candidates:
         raise OSError("no log in bounded scan")
     descriptor = open_regular(candidates[0])
     try:
-        size = os.fstat(descriptor).st_size
+        info = os.fstat(descriptor)
+        size = info.st_size
         offset = max(0, size - 8192)
         os.lseek(descriptor, offset, os.SEEK_SET)
         raw = os.read(descriptor, 8192)
@@ -77,6 +81,10 @@ def log_excerpt(source):
         # Do not present a half-written final record as a complete observation.
         raw = raw.rpartition(b'\n')[0]
         return {"text": raw.decode('utf-8', errors='replace'), "file_size_bytes": size,
+                "selected_file": str(candidates[0].relative_to(source.path)) if source.type != "file" else candidates[0].name,
+                "file_modified_at": datetime.fromtimestamp(info.st_mtime, timezone.utc).isoformat(),
+                "selection_basis": "file_modification_time", "truncated": limited,
+                "scanned_entries": scanned,
                 "scope": "One recent file tail, up to 8192 bytes, from at most 256 scanned entries. Not complete history."}
     finally:
         os.close(descriptor)
@@ -122,7 +130,7 @@ def collect_observations(settings, sources_config):
                     return item
                 return cleaner.clean(str(item))
             value = clean(value)
-            status = "partial" if isinstance(value, dict) and value.get("failures") else "observed"
+            status = "partial" if isinstance(value, dict) and (value.get("failures") or value.get("truncated")) else "observed"
         except (OSError, ValueError, ProviderError, psycopg.Error):
             value, status = {"reason": "probe_unavailable"}, "unavailable"
         observations.append({"observation_id": f"obs-{len(observations)+1}", "service": service,

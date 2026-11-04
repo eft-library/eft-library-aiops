@@ -64,6 +64,35 @@ def validate_plan(result, catalog, parent):
         raise ProviderError(ErrorKind.OUTPUT) from None
 
 
+def historical_batches(settings, batch_ids, start, end, deadline):
+    """Prioritize event-time overlap; retain batches with unknown metadata."""
+    for batch_id in batch_ids:
+        if not isinstance(batch_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', batch_id):
+            raise ValueError('invalid stored batch id')
+    overlapping, unknown = [], []
+    remaining, excluded = 8 * 1024 * 1024, 0
+    for index, batch_id in enumerate(batch_ids):
+        if index >= 1000 or remaining <= 0 or time.monotonic() >= deadline:
+            unknown.append(batch_id)
+            continue
+        path = settings.data_dir / 'collection' / 'batches' / batch_id / 'snapshot.json'
+        try:
+            with os.fdopen(open_regular(path), 'rb') as stream:
+                raw = stream.read(min(262145, remaining))
+            remaining -= len(raw)
+            bounds = json.loads(raw)['time_range']
+            lower, upper = (datetime.fromisoformat(bounds[key]) for key in ('start', 'end'))
+            if lower.tzinfo is None or upper.tzinfo is None or lower > upper:
+                raise ValueError('invalid bounds')
+            if lower < end and upper >= start:
+                overlapping.append(batch_id)
+            else:
+                excluded += 1
+        except (OSError, ValueError, KeyError, TypeError):
+            unknown.append(batch_id)
+    return overlapping + unknown, excluded, len(unknown)
+
+
 def historical_logs(settings, parent, target, anchor):
     manifest = parent['manifest_json']
     if isinstance(manifest, str):
@@ -73,7 +102,9 @@ def historical_logs(settings, parent, target, anchor):
         start, end = max(start, anchor - timedelta(minutes=15)), min(end, anchor + timedelta(minutes=15))
     deadline, budget = time.monotonic() + 3, 2 * 1024 * 1024
     events, scanned, files, omitted, unavailable = [], 0, 0, 0, 0
-    batch_ids = manifest.get('batch_ids', [])
+    batch_ids, excluded, unknown = historical_batches(
+        settings, manifest.get('batch_ids', []), start, end, min(deadline, time.monotonic() + .5))
+    scanned_start = scanned_end = None
     exhausted = False
     for batch_id in batch_ids:
         if files >= 100 or budget <= 0 or time.monotonic() >= deadline or len(events) >= 40:
@@ -101,6 +132,9 @@ def historical_logs(settings, parent, target, anchor):
                         stamp = datetime.fromisoformat(event['timestamp'])
                         if stamp.tzinfo is None:
                             raise ValueError('unassigned timezone')
+                        if event.get('service') == target:
+                            scanned_start = min(scanned_start, stamp) if scanned_start else stamp
+                            scanned_end = max(scanned_end, stamp) if scanned_end else stamp
                         if event.get('service') == target and start <= stamp < end:
                             events.append({'event_id': str(event.get('event_id', ''))[:128],
                                            'timestamp': stamp.isoformat(), 'service': target,
@@ -116,6 +150,10 @@ def historical_logs(settings, parent, target, anchor):
             'unavailable_files': unavailable, 'omitted_records': omitted,
             'truncated': exhausted or len(batch_ids) > files,
             'window_start': start.isoformat(), 'window_end': end.isoformat(),
+            'excluded_batches': excluded, 'unknown_range_batches': unknown,
+            'scanned_event_start': scanned_start.isoformat() if scanned_start else None,
+            'scanned_event_end': scanned_end.isoformat() if scanned_end else None,
+            'stop_reason': 'scan_limit' if exhausted or len(batch_ids) > files else 'eligible_batches_exhausted',
             'scope': 'Bounded sample of stored historical logs. Empty results do not prove no errors; older files may be omitted by limits. Window end exclusive.'}
 
 
