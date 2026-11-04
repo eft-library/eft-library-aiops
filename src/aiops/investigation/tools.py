@@ -30,7 +30,7 @@ def period_bounds(parent):
 def catalogue(config):
     targets = [name for name, source in config.sources.items() if source.enabled]
     tools = [
-        {'tool': 'historical_logs', 'targets': targets, 'scope': 'Stored normalized daily logs, not live state. ±15 minutes around anchor or bounded daily sample; 2MiB/100 files/3 seconds/40 matching events max.'},
+        {'tool': 'historical_logs', 'targets': targets, 'scope': 'Stored normalized daily logs, not live state. ±15 minutes around anchor or bounded daily sample; optional literal DAG/task/run identifiers; nearest-anchor order across batches; 2MiB/100 files/3 seconds/40 matching events max.'},
         {'tool': 'recent_logs', 'targets': targets, 'scope': 'One configured file tail <=8KiB; not full history. Acquisition time is not event time.'},
         {'tool': 'database_statistics', 'targets': ['aiops_database'], 'scope': 'Configured AIOps DB statistics only; fixed read-only SQL, no application DB access or query text.'},
         {'tool': 'process_summary', 'targets': ['host'], 'scope': 'Counts/RSS for known program names; <=512 processes/2 seconds. No arguments, environment, executable paths or proof of service health.'},
@@ -56,7 +56,13 @@ def validate_plan(result, catalog, parent):
             if request.anchor is not None:
                 if request.tool != 'historical_logs' or request.anchor.tzinfo is None or not start <= request.anchor < end:
                     raise ValueError('invalid historical anchor')
-            identity = (request.tool, request.target, request.anchor.isoformat() if request.anchor else None)
+            if request.identifiers:
+                if request.tool != 'historical_logs' or any(
+                    not re.fullmatch(r'[A-Za-z0-9_.:+@=-]{1,160}', value) for value in request.identifiers
+                ):
+                    raise ValueError('invalid historical identifiers')
+            identity = (request.tool, request.target, request.anchor.isoformat() if request.anchor else None,
+                        tuple(request.identifiers or []))
             if identity in seen:
                 raise ValueError('duplicate probe request')
             seen.add(identity)
@@ -94,7 +100,7 @@ def historical_batches(settings, batch_ids, start, end, deadline):
     return overlapping + unknown, excluded, len(unknown)
 
 
-def historical_logs(settings, parent, target, anchor):
+def historical_logs(settings, parent, target, anchor, identifiers=None):
     manifest = parent['manifest_json']
     if isinstance(manifest, str):
         manifest = json.loads(manifest)
@@ -119,11 +125,13 @@ def historical_logs(settings, parent, target, anchor):
         try:
             offsets, invalid = event_offsets(
                 settings.data_dir / 'collection' / 'batches' / batch_id,
-                target, start, end, selection_deadline)
+                target, start, end, selection_deadline, anchor=anchor, identifiers=identifiers, ranked=True)
             indexed += 1
             index_invalid += invalid
             if offsets:
-                plans.append((batch_id, offsets))
+                for offset, length, stamp in offsets:
+                    distance = abs((datetime.fromisoformat(stamp) - anchor).total_seconds()) if anchor else 0
+                    plans.append((distance, stamp, batch_id, [(offset, length)]))
             else:
                 excluded += 1
         except (OSError, ValueError, TypeError, sqlite3.Error):
@@ -132,7 +140,10 @@ def historical_logs(settings, parent, target, anchor):
         settings, legacy, start, end, min(deadline, time.monotonic() + .25))
     excluded += legacy_excluded
     missing_indexes = len(batch_ids) - indexed
+    plans.sort(key=lambda item: item[:3])
+    plans = [(batch_id, offsets) for _, _, batch_id, offsets in plans]
     plans.extend((batch_id, None) for batch_id in legacy)
+    checked_files = set()
     scanned_start = scanned_end = None
     exhausted = False
     for batch_id, offsets in plans:
@@ -142,7 +153,8 @@ def historical_logs(settings, parent, target, anchor):
         if not isinstance(batch_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', batch_id):
             raise ValueError('invalid stored batch id')
         path = settings.data_dir / 'collection' / 'batches' / batch_id / 'events.jsonl'
-        files += 1
+        checked_files.add(batch_id)
+        files = len(checked_files)
         try:
             descriptor = open_regular(path)
             with os.fdopen(descriptor, 'rb') as stream:
@@ -174,11 +186,15 @@ def historical_logs(settings, parent, target, anchor):
                         if event.get('service') == target:
                             scanned_start = min(scanned_start, stamp) if scanned_start else stamp
                             scanned_end = max(scanned_end, stamp) if scanned_end else stamp
-                        if event.get('service') == target and start <= stamp < end:
+                        searchable = '\n'.join((str(event.get('message', '')), str(event.get('file', '')),
+                                                 json.dumps(event.get('metadata', {}), ensure_ascii=False)))
+                        if (event.get('service') == target and start <= stamp < end
+                                and all(value in searchable for value in identifiers or [])):
                             events.append({'event_id': str(event.get('event_id', ''))[:128],
                                            'timestamp': stamp.isoformat(), 'service': target,
                                            'level': str(event.get('level', 'UNKNOWN'))[:32],
-                                           'message': str(event.get('message', ''))[:2000]})
+                                           'message': str(event.get('message', ''))[:2000],
+                                           'message_truncated': len(str(event.get('message', ''))) > 2000})
                     except (ValueError, TypeError, KeyError, AttributeError):
                         omitted += 1
                 else:
@@ -187,14 +203,15 @@ def historical_logs(settings, parent, target, anchor):
             unavailable += 1
     return {'events': events, 'scanned_records': scanned, 'files_checked': files,
             'unavailable_files': unavailable, 'omitted_records': omitted,
-            'truncated': exhausted or len(plans) > files,
+            'truncated': exhausted,
             'window_start': start.isoformat(), 'window_end': end.isoformat(),
             'excluded_batches': excluded, 'unknown_range_batches': unknown,
             'indexed_batches': indexed, 'unindexed_batches': missing_indexes,
             'index_omitted_records': index_invalid,
+            'identifiers': identifiers or [], 'selection_order': 'nearest_anchor_across_batches' if anchor else 'event_time',
             'scanned_event_start': scanned_start.isoformat() if scanned_start else None,
             'scanned_event_end': scanned_end.isoformat() if scanned_end else None,
-            'stop_reason': 'scan_limit' if exhausted or len(plans) > files else 'eligible_batches_exhausted',
+            'stop_reason': 'scan_limit' if exhausted else 'eligible_batches_exhausted',
             'scope': 'Indexed service/time lookup with bounded legacy fallback. Bounded sample of stored historical logs. Empty results do not prove no errors; older files may be omitted by limits. Window end exclusive.'}
 
 
@@ -225,7 +242,7 @@ def process_summary():
 
 def dispatch(request, settings, config, parent):
     if request.tool == 'historical_logs':
-        return historical_logs(settings, parent, request.target, request.anchor)
+        return historical_logs(settings, parent, request.target, request.anchor, request.identifiers)
     if request.tool == 'recent_logs':
         return log_excerpt(config.sources[request.target])
     if request.tool == 'database_statistics':
@@ -242,6 +259,40 @@ def dispatch(request, settings, config, parent):
             'scope': 'Current point samples for configured targets only; not the historical period.'}
 
 
+def bound_probe_output(data):
+    """Preserve event headlines before dropping lower-priority evidence."""
+    def size():
+        return len(json.dumps(data, ensure_ascii=False, default=str).encode())
+
+    if size() <= 12000:
+        return data
+    data['truncated'] = True
+    data['output_omitted_events'] = 0
+    data['output_shortened_messages'] = 0
+    # Events already have relevance order. Keep identity/time/level for as many
+    # events as possible instead of allowing a few stack traces to consume it.
+    shortened = set()
+    while size() > 12000:
+        candidates = [event for event in data.get('events', []) if len(event.get('message', '')) > 160]
+        if not candidates:
+            break
+        event = max(candidates, key=lambda value: len(value['message']))
+        if id(event) not in shortened:
+            shortened.add(id(event))
+            data['output_shortened_messages'] += 1
+        event['message'] = event['message'][:max(160, len(event['message']) // 2)]
+        event['message_truncated'] = True
+    for field in ('events', 'metrics'):
+        while data.get(field) and size() > 12000:
+            data[field].pop()
+            if field == 'events':
+                data['output_omitted_events'] += 1
+    if size() > 12000:
+        return {'truncated': True, 'reason': 'probe_output_cap',
+                'scope': 'Output exceeded 12KB; no health conclusion may be drawn.'}
+    return data
+
+
 def execute_plan(plan, settings, config, parent, cleaner, *, budget_seconds=20):
     # plan MUST be validated in full before this function is reached.
     import psycopg
@@ -255,13 +306,7 @@ def execute_plan(plan, settings, config, parent, cleaner, *, budget_seconds=20):
         else:
             try:
                 data = cleaner(dispatch(request, settings, config, parent))
-                if len(json.dumps(data, ensure_ascii=False, default=str).encode()) > 12000:
-                    data['truncated'] = True
-                    for field in ('events', 'metrics'):
-                        while data.get(field) and len(json.dumps(data, ensure_ascii=False, default=str).encode()) > 12000:
-                            data[field].pop()
-                    if len(json.dumps(data, ensure_ascii=False, default=str).encode()) > 12000:
-                        data = {'truncated': True, 'reason': 'probe_output_cap', 'scope': 'Output exceeded 12KB; no health conclusion may be drawn.'}
+                data = bound_probe_output(data)
                 partial = any(data.get(key) for key in ('failures', 'truncated', 'omitted_records', 'unavailable_files', 'inaccessible_processes', 'index_omitted_records'))
                 status = 'partial' if partial else 'observed'
             except (OSError, ValueError, ProviderError, psycopg.Error, psutil.Error):

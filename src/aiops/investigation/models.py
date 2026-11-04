@@ -99,6 +99,7 @@ class ProbeRequest(Strict):
     tool: Literal['historical_logs', 'recent_logs', 'system_metrics', 'docker_metrics', 'database_statistics', 'process_summary']
     target: str = Field(min_length=1, max_length=64)
     anchor: datetime | None
+    identifiers: list[str] | None = Field(default=None, max_length=3, description="Literal DAG/task/run identifiers from supplied evidence; historical_logs only")
     reason: str = Field(min_length=1, max_length=1200)
 
 
@@ -125,7 +126,10 @@ Select at most FIVE requests from tool_catalog; use the exact allowed target ali
 No path, command, SQL, URL, PID, credential or unlisted target may be requested.
 Only historical_logs accepts a timezone-aware anchor inside the historical daily period;
 use an event timestamp from supplied data when relevant; null means the bounded daily sample.
-Other tools require anchor=null. Prefer historically relevant evidence and missing current
+For historical_logs, identifiers may contain up to three exact DAG/task/run identifier strings
+from supplied evidence (e.g. collect_trader_offers). All must match the stored message, file
+label or metadata. Omit identifiers if none are supplied; never invent an identifier.
+Other tools require anchor=null and identifiers=null. Prefer historically relevant evidence and missing current
 checks over repeating baseline probes. Current checks do not recreate yesterday's state.
 If available tools cannot answer a question, list that limitation rather than inventing access.
 An empty requests list is valid when additional probes would add no useful evidence.

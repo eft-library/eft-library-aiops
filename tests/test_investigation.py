@@ -340,3 +340,55 @@ def test_indexed_query_respects_event_cap_and_exclusive_end(tmp_path):
     assert len(result['events']) == 40
     assert result['truncated'] is True
     assert all(event['message'] != 'excluded' for event in result['events'])
+
+
+def test_historical_identifiers_and_nearest_anchor_across_batches(tmp_path):
+    from datetime import datetime
+    from aiops.collectors.event_index import build_event_index
+    from aiops.investigation.tools import historical_logs
+
+    parent = daily_parent()
+    parent['manifest_json'] = {'batch_ids': ['batch-first', 'batch-second']}
+    for name, minute in [('first', 1), ('second', 10)]:
+        folder = tmp_path / 'collection' / 'batches' / ('batch-' + name)
+        folder.mkdir(parents=True)
+        records = [{'timestamp': f'2020-01-01T10:{minute:02}:00+09:00', 'service': 'airflow',
+                    'message': f'other_task {i}'} for i in range(80)]
+        records.append({'timestamp': f'2020-01-01T10:{minute:02}:01+09:00', 'service': 'airflow',
+                        'file': 'dag_id=trader/run_id=scheduled_123/task_id=collect_trader_offers/attempt=1.log',
+                        'message': name})
+        (folder / 'events.jsonl').write_text(''.join(json.dumps(item) + '\n' for item in records))
+        build_event_index(folder)
+    settings = Settings(data_dir=tmp_path)
+    anchor = datetime.fromisoformat('2020-01-01T10:10:00+09:00')
+    result = historical_logs(settings, parent, 'airflow', anchor, ['collect_trader_offers', 'scheduled_123'])
+    assert [event['message'] for event in result['events']] == ['second', 'first']
+    assert result['scanned_records'] == 2
+    assert result['truncated'] is False
+    assert result['files_checked'] == 2
+    unfiltered = historical_logs(settings, parent, 'airflow', anchor)
+    assert unfiltered['events'][0]['timestamp'] == '2020-01-01T10:10:00+09:00'
+
+
+def test_output_cap_preserves_headlines_before_dropping_events():
+    from aiops.investigation.tools import bound_probe_output
+
+    data = {'events': [{'event_id': str(i), 'timestamp': '2020-01-01T00:00:00Z',
+                        'level': 'ERROR', 'message': 'Failure headline\n' + 'trace' * 390}
+                       for i in range(31)]}
+    result = bound_probe_output(data)
+    assert len(result['events']) == 31
+    assert result['output_omitted_events'] == 0
+    assert result['output_shortened_messages'] == 31
+    assert all(event['message'].startswith('Failure headline') for event in result['events'])
+    assert len(json.dumps(result, ensure_ascii=False).encode()) <= 12000
+
+
+def test_plan_rejects_identifiers_for_live_tools():
+    from aiops.investigation.tools import validate_plan
+    from aiops.providers.base import ProviderError
+
+    request = {'tool': 'recent_logs', 'target': 'fastapi', 'anchor': None,
+               'identifiers': ['task_id'], 'reason': 'test'}
+    with pytest.raises(ProviderError):
+        validate_plan(empty_plan([request]), [{'tool': 'recent_logs', 'targets': ['fastapi']}], daily_parent())

@@ -20,7 +20,7 @@ def build_event_index(folder):
             try:
                 db.executescript('''
                     CREATE TABLE metadata (version INTEGER, size INTEGER, mtime_ns INTEGER, invalid INTEGER);
-                    CREATE TABLE entries (service TEXT, stamp TEXT, offset INTEGER, length INTEGER);
+                    CREATE TABLE entries (service TEXT, stamp TEXT, offset INTEGER, length INTEGER, search_text TEXT);
                 ''')
                 invalid = 0
                 while True:
@@ -33,15 +33,17 @@ def build_event_index(folder):
                         stamp = datetime.fromisoformat(event['timestamp'])
                         if stamp.tzinfo is None or not line.endswith(b'\n'):
                             raise ValueError('invalid event')
-                        db.execute('INSERT INTO entries VALUES (?, ?, ?, ?)', (
+                        db.execute('INSERT INTO entries VALUES (?, ?, ?, ?, ?)', (
                             event['service'], stamp.astimezone(timezone.utc).isoformat(timespec='microseconds'),
-                            offset, len(line)))
+                            offset, len(line), '\n'.join((str(event.get('file', '')),
+                                json.dumps(event.get('metadata', {}), ensure_ascii=False),
+                                str(event.get('message', ''))))))
                     except (ValueError, KeyError, TypeError):
                         invalid += 1
                 after = os.fstat(source.fileno())
                 if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
                     raise ValueError('events changed while indexing')
-                db.execute('INSERT INTO metadata VALUES (1, ?, ?, ?)',
+                db.execute('INSERT INTO metadata VALUES (2, ?, ?, ?)',
                            (after.st_size, after.st_mtime_ns, invalid))
                 db.execute('CREATE INDEX service_time ON entries(service, stamp, offset)')
                 db.commit()
@@ -59,7 +61,7 @@ def build_event_index(folder):
             os.unlink(temporary)
 
 
-def event_offsets(folder, target, start, end, deadline):
+def event_offsets(folder, target, start, end, deadline, *, anchor=None, identifiers=None, ranked=False):
     """Return at most 41 matching locations; refuse stale or incomplete indexes."""
     import time
     from aiops.investigation.probes import open_regular
@@ -75,12 +77,23 @@ def event_offsets(folder, target, start, end, deadline):
                 info = os.fstat(event_fd)
             finally:
                 os.close(event_fd)
-            if version != 1 or (size, modified) != (info.st_size, info.st_mtime_ns):
+            if version not in (1, 2) or (size, modified) != (info.st_size, info.st_mtime_ns):
                 raise ValueError('stale event index')
             bounds = [value.astimezone(timezone.utc).isoformat(timespec='microseconds') for value in (start, end)]
-            rows = db.execute('''SELECT offset, length FROM entries
-                WHERE service=? AND stamp>=? AND stamp<? ORDER BY stamp, offset LIMIT 41''',
-                (target, *bounds)).fetchall()
+            filters, parameters = '', [target, *bounds]
+            if identifiers:
+                if version < 2:
+                    raise ValueError('identifier index upgrade required')
+                filters = ''.join(' AND instr(search_text, ?) > 0' for _ in identifiers)
+                parameters.extend(identifiers)
+            ordering = 'stamp, offset'
+            if anchor is not None:
+                ordering = 'abs(julianday(stamp)-julianday(?)), stamp, offset'
+                parameters.append(anchor.astimezone(timezone.utc).isoformat())
+            rows = db.execute(
+                'SELECT offset, length' + (', stamp' if ranked else '') +
+                ' FROM entries WHERE service=? AND stamp>=? AND stamp<?' + filters +
+                ' ORDER BY ' + ordering + ' LIMIT 41', parameters).fetchall()
             return rows, invalid
         finally:
             db.close()
