@@ -1412,3 +1412,64 @@ def test_evaluation_history_validation_and_conflict(pg_setup):
     assert item['history'][1]['actual_result'] == 'not yet confirmed'
     with pytest.raises(LookupError):
         read_evaluations(settings, 'missing')
+
+
+def test_weekly_monthly_pin_latest_evaluations_and_revise_on_edits(pg_setup, monkeypatch):
+    from aiops.storage.evaluations import EvaluationInput, save_evaluation
+    from aiops.storage import views
+    from psycopg.types.json import Jsonb
+    settings, service, _ = pg_setup
+    parent = seed(service)
+    queue = JobQueue(settings)
+    queue.enqueue(parent['report_id'])
+    queue.close()
+    with Worker(settings, provider=FakeProvider()) as worker:
+        worker.once()
+    with psycopg.connect(settings.database_url, autocommit=True) as db:
+        result = db.execute('SELECT result_json FROM public.aiops_report_versions WHERE report_id=%s',
+                            (parent['report_id'],)).fetchone()[0]
+        result['report']['findings'] = [
+            {'issue': f'issue-{i}', 'hypothesis': 'network', 'recommended_checks': [], 'evidence_ids': []}
+            for i in range(3)]
+        db.execute('UPDATE public.aiops_report_versions SET result_json=%s WHERE report_id=%s',
+                   (Jsonb(result), parent['report_id']))
+    empty = service.execute('weekly', '2019-12-30')
+    empty_snapshot = json.loads(Path(empty['input']).read_text())['operator_evaluations']
+    assert empty_snapshot['status'] == 'no_evaluations'
+    assert empty_snapshot['total_findings'] == 3
+    monkeypatch.setenv('TEST_PASSWORD', 'private-evaluation-secret')
+    body = EvaluationInput(finding_key='report:findings:0', expected_revision=0,
+                           verdict='unconfirmed', reviewer='operator', actual_result='private-evaluation-secret')
+    save_evaluation(settings, parent['report_id'], body)
+    first = service.execute('weekly', '2019-12-30')
+    first_source = json.loads(Path(first['input']).read_text())
+    value = first_source['operator_evaluations']
+    assert value['evaluated_findings'] == 1
+    assert value['unevaluated_findings'] == 2
+    assert value['evaluation_coverage_percent'] == 33.33
+    assert value['verdict_counts']['unconfirmed'] == 1
+    assert value['verdict_counts']['incorrect'] == 0
+    assert value['confirmed_findings'] == 0
+    assert 'private-evaluation-secret' not in json.dumps(value)
+    assert service.execute('weekly', '2019-12-30')['reused'] is True
+    save_evaluation(settings, parent['report_id'], body.model_copy(update={
+        'expected_revision': 1, 'verdict': 'correct', 'actual_result': 'retry succeeded', 'usefulness': 'helpful'}))
+    assert service.is_current(first['report_id']) is False
+    second = service.execute('weekly', '2019-12-30')
+    assert second['revision'] == first['revision'] + 1
+    value = json.loads(Path(second['input']).read_text())['operator_evaluations']
+    assert value['verdict_counts']['correct'] == 1
+    assert value['verdict_counts']['unconfirmed'] == 0
+    assert value['items'][0]['revision'] == 2
+    assert json.loads(Path(first['input']).read_text())['operator_evaluations']['items'][0]['revision'] == 1
+    detail = views.report_detail(settings, second['report_id'])
+    assert detail['operator_evaluations']['usefulness_counts']['helpful'] == 1
+    # Complete the week so it also becomes monthly context; its labels must not be added again.
+    queue = JobQueue(settings); queue.enqueue(second['report_id']); queue.close()
+    with Worker(settings, provider=FakeProvider()) as worker:
+        worker.once()
+    month = service.execute('monthly', '2020-01-01')
+    source = json.loads(Path(month['input']).read_text())
+    assert len(source['weekly_context']) == 1
+    assert source['operator_evaluations']['evaluated_findings'] == 1
+    assert source['operator_evaluations']['total_findings'] == 3

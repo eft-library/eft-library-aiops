@@ -99,6 +99,7 @@ def report_detail(settings, report_id):
         **report_summary(row), "result": result, "investigations": investigations,
         "data_quality": source.get("data_quality", {}),
         "scheduled_health_probes": source.get("scheduled_health_probes"),
+        "operator_evaluations": source.get("operator_evaluations"),
         "totals": source.get("totals", source.get("observed_totals", {})),
         "source_batch_count": source.get("source_batch_count"),
         "input_limitations": source.get("limitations", []),

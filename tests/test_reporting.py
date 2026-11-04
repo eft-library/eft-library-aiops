@@ -471,3 +471,18 @@ def test_unclassified_levels_are_not_reported_as_healthy(reporting):
     result = service.execute("daily", "2026-10-27")
     assert result["coverage_complete"] is False
     assert content(result)["data_quality"]["unclassified_level_events"] == 1
+
+
+def test_evaluation_detail_cap_preserves_counts_and_archived_snapshot():
+    import copy
+    rollup = {'items': [{'report_id': 'daily-test', 'actual_result': '확인' * 4000} for _ in range(8)],
+              'evaluated_findings': 8, 'verdict_counts': {'correct': 8}, 'omitted_details': 0}
+    archived = copy.deepcopy(rollup)
+    snapshot = {'analysis_type': 'weekly', 'limitations': [], 'operator_evaluations': rollup,
+                'daily_reports': [{'report_id': 'daily-test', 'findings': [], 'summary': 'summary'}]}
+    result = fit_input(snapshot, 3000)
+    assert len(encoded(result).encode()) <= 3000
+    assert result['operator_evaluations']['evaluated_findings'] == 8
+    assert result['operator_evaluations']['verdict_counts']['correct'] == 8
+    assert result['operator_evaluations']['omitted_details'] == 8
+    assert len(archived['items']) == 8

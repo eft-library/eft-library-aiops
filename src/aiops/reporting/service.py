@@ -1,4 +1,5 @@
 import hashlib
+import copy
 import json
 import math
 from pathlib import Path
@@ -29,6 +30,10 @@ def fit_input(snapshot, limit):
             snapshot["error_groups"].pop()
         elif snapshot.get("metrics"):
             snapshot["metrics"].pop()
+        elif snapshot.get("operator_evaluations", {}).get("items"):
+            evaluation = snapshot["operator_evaluations"]
+            evaluation["items"].pop()
+            evaluation["omitted_details"] += 1
         elif snapshot.get("weekly_context"):
             snapshot["weekly_context"].pop()
         else:
@@ -365,6 +370,10 @@ class ReportingService:
             report_id: value["investigation_id"] for report_id, value in investigations.items()
         }:
             return False
+        if 'operator_evaluations' in manifest:
+            from aiops.reporting.evaluations import evaluation_rollup
+            if manifest['operator_evaluations']['signature'] != evaluation_rollup(self.settings, available)['signature']:
+                return False
         if row["kind"] == "monthly":
             context = self._weekly_context(period, collection)
             return manifest["weekly_context_ids"] == [
@@ -404,6 +413,10 @@ class ReportingService:
         manifest["investigation_ids"] = {
             report_id: value["investigation_id"] for report_id, value in investigations.items()
         }
+        from aiops.reporting.evaluations import evaluation_rollup
+
+        evaluations = evaluation_rollup(self.settings, available)
+        manifest['operator_evaluations'] = copy.deepcopy(evaluations)
         daily_briefs = [brief(row) for row in available]
         for child in daily_briefs:
             if child["report_id"] in investigations:
@@ -421,6 +434,7 @@ class ReportingService:
                 "incomplete_daily_reports": incomplete,
             },
             "daily_reports": daily_briefs,
+            "operator_evaluations": evaluations,
             "observed_totals": {
                 key: sum(value["observed_totals"].get(key, 0) for value in daily_briefs)
                 for key in (
