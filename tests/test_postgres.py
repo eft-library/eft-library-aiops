@@ -128,7 +128,7 @@ def seed(service, day="2020-01-01", suffix="one"):
 def test_migration_is_explicit_idempotent_and_scoped(pg_setup):
     settings, _, _ = pg_setup
     initialize(settings)
-    assert doctor(settings)["migration"] == 3
+    assert doctor(settings)["migration"] == 4
     with psycopg.connect(settings.database_url) as conn:
         rows = conn.execute(
             "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename LIKE 'aiops_%'"
@@ -143,6 +143,7 @@ def test_migration_is_explicit_idempotent_and_scoped(pg_setup):
             "aiops_job_attempts",
             "aiops_investigations",
             "aiops_investigation_attempts",
+            "aiops_finding_evaluations",
         }
 
 
@@ -692,7 +693,7 @@ def test_legacy_upgrade_preserves_data_foreign_keys_and_identity(
     settings, _, _ = pg_setup
     previous_id = make_legacy_schema(settings, keep_unrelated=keep_unrelated)
     assert initialize(settings)["schema"] == "public"
-    assert doctor(settings)["migration"] == 3
+    assert doctor(settings)["migration"] == 4
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
         assert (
             conn.execute("SELECT report_id FROM public.aiops_analysis_jobs").fetchone()[
@@ -1290,7 +1291,7 @@ def test_automatic_investigation_uses_two_isolated_codex_calls(pg_setup,monkeypa
         assert command[command.index('--sandbox')+1]=='read-only'
         assert 'AIOPS_DATABASE_URL' not in kwargs['env'] and 'PGPASSWORD' not in kwargs['env']
         if 'requests' in schema['properties']:
-            assert schema['$defs']['ProbeRequest']['required']==['tool','target','anchor','reason']
+            assert schema['$defs']['ProbeRequest']['required']==['tool','target','anchor','identifiers','reason']
             payload=empty_plan().report.model_dump_json()
             calls.append('plan')
         else:
@@ -1382,3 +1383,32 @@ def test_health_metrics_are_attached_to_daily_and_exposed_as_evidence(pg_setup):
         db.execute("INSERT INTO public.response_time VALUES ('FastAPI',.08,'2020-01-01T10:05:00+09:00')")
     again=source.execute('daily','2020-01-01')
     assert again['report_id']!=prepared['report_id']
+
+
+def test_evaluation_history_validation_and_conflict(pg_setup):
+    from aiops.storage.evaluations import EvaluationInput, read_evaluations, save_evaluation
+    settings, service, _ = pg_setup
+    report_id = seed(service)['report_id']
+    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        conn.execute("UPDATE public.aiops_report_versions SET status='COMPLETED', result_json=%s WHERE report_id=%s",
+                     (psycopg.types.json.Jsonb({'report': {'findings': [{'issue': 'failure', 'hypothesis': 'network'}]}}), report_id))
+    data = read_evaluations(settings, report_id)
+    assert data['items'][0]['latest'] is None
+    body = EvaluationInput(finding_key='report:findings:0', expected_revision=0,
+                           verdict='unconfirmed', reviewer='operator', actual_result='not yet confirmed')
+    first = save_evaluation(settings, report_id, body)
+    assert first['revision'] == 1
+    assert first['finding_snapshot']['issue'] == 'failure'
+    with pytest.raises(FileExistsError):
+        save_evaluation(settings, report_id, body)
+    with pytest.raises(LookupError):
+        save_evaluation(settings, report_id, body.model_copy(update={'finding_key': 'report:findings:999'}))
+    second = save_evaluation(settings, report_id, body.model_copy(update={
+        'expected_revision': 1, 'verdict': 'correct', 'actual_result': 'confirmed', 'evidence': 'task retry succeeded'}))
+    assert second['revision'] == 2
+    item = read_evaluations(settings, report_id)['items'][0]
+    assert item['latest']['verdict'] == 'correct'
+    assert [row['verdict'] for row in item['history']] == ['correct', 'unconfirmed']
+    assert item['history'][1]['actual_result'] == 'not yet confirmed'
+    with pytest.raises(LookupError):
+        read_evaluations(settings, 'missing')

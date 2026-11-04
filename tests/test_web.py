@@ -119,3 +119,26 @@ def test_login_validation_never_echoes_password():
     client=TestClient(create_web_app(api_url='http://example.invalid',token='api',username='a',password='b',session_secret='s'*32))
     response=client.post('/auth/login',json={'username':'a','password':'private-value','unexpected':1})
     assert response.status_code==422 and 'private-value' not in response.text
+
+
+def test_evaluation_write_requires_session_origin_and_attributes_reviewer(web, monkeypatch):
+    requests = []
+    class Opener:
+        def open(self, request, timeout):
+            requests.append(request)
+            return BytesIO(json.dumps({'revision': 1}).encode())
+    monkeypatch.setattr('aiops.web_server.build_opener', lambda *args: Opener())
+    path = '/write/reports/daily-2026-11-04-v0001/evaluations'
+    body = {'finding_key': 'report:findings:0', 'expected_revision': 0, 'verdict': 'unconfirmed'}
+    assert web.post(path, json=body).status_code == 403
+    assert web.post(path, json=body, headers={'X-AIOps-Web': '1', 'Origin': 'https://evil.invalid'}).status_code == 403
+    assert not requests
+    response = web.post(path, json=body, headers={'X-AIOps-Web': '1'})
+    assert response.status_code == 201
+    assert json.loads(requests[0].data)['reviewer'] == 'operator'
+    assert requests[0].get_header('X-aiops-key') == 'private-test-key'
+    assert web.post(path, json={**body, 'reviewer': 'spoof'}, headers={'X-AIOps-Web': '1'}).status_code == 422
+    assert web.get('/read/reports/daily-2026-11-04-v0001/evaluations').status_code == 200
+    assert web.post('/write/collect', json={}).status_code == 404
+    web.post('/auth/logout', headers={'X-AIOps-Web': '1'})
+    assert web.post(path, json=body, headers={'X-AIOps-Web': '1'}).status_code == 401

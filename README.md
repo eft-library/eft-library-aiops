@@ -241,3 +241,5 @@ AIOPS_RUN_INTEGRATION=1 uv run pytest -q -m integration
 ## 웹 로그인과 서비스 로그
 
 조회 웹은 `AIOPS_WEB_USERNAME`, `AIOPS_WEB_PASSWORD`, `AIOPS_WEB_SESSION_SECRET` 설정과 로그인이 필요합니다. 세션 키는 32자 이상의 임의 값으로 지정합니다. 로그인 후 서비스 로그 화면에서 최근 기록·실시간 추가·검색·수준 필터·일시정지를 사용할 수 있습니다. 기존 수집과 분리되며 Airflow 변경이나 DB 초기화는 필요 없습니다. [로그인·스트리밍 설정](docs/WEB.md#고정-계정-로그인과-서비스-로그)을 확인하고 `./restart.sh`로 반영하세요.
+
+보고서별 운영자 평가 입력·수정 이력 및 DB 적용 방법은 [분석 결과 평가](docs/EVALUATIONS.md)를 참고하세요.

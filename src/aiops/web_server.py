@@ -1,4 +1,4 @@
-"""Read-only website. The API credential never leaves this server."""
+"""Reporting website with authenticated operator evaluations. The API credential never leaves this server."""
 
 import json
 import re
@@ -15,11 +15,12 @@ from fastapi import Request as WebRequest
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from aiops.web_auth import WebAuth, COOKIE
+from aiops.storage.evaluations import EvaluationInput
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 
 ASSETS = Path(__file__).with_name("web")
-READ_PATH = re.compile(r"^(status|collections|jobs|reports|reports/[A-Za-z0-9_-]{1,128}|logs/services|logs/files)$")
+READ_PATH = re.compile(r"^(status|collections|jobs|reports|reports/[A-Za-z0-9_-]{1,128}(?:/evaluations)?|logs/services|logs/files)$")
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -44,7 +45,7 @@ def create_web_app(*, api_url: str, token: str, username: str = "", password: st
     async def headers(request, call_next):
         public_paths = {"/health", "/login", "/auth/login", "/favicon.ico", "/assets/style.css", "/assets/login.js"}
         if request.url.path not in public_paths and not auth.valid(request.cookies.get(COOKIE)):
-            response = JSONResponse(status_code=401, content={"error":"login_required"}) if request.url.path.startswith(("/read/", "/logs/", "/auth/")) else RedirectResponse("/login", status_code=303)
+            response = JSONResponse(status_code=401, content={"error":"login_required"}) if request.url.path.startswith(("/read/", "/write/", "/logs/", "/auth/")) else RedirectResponse("/login", status_code=303)
         else:
             response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -93,6 +94,34 @@ def create_web_app(*, api_url: str, token: str, username: str = "", password: st
             raw=response.read(2_000_001)
             if len(raw)>2_000_000:raise ValueError("response too large")
             return json.loads(raw)
+
+    class WebEvaluation(EvaluationInput):
+        reviewer: str = Field(default="", max_length=0, exclude=True)
+
+    @app.post("/write/reports/{report_id}/evaluations")
+    def write_evaluation(report_id: str, body: WebEvaluation, request: WebRequest):
+        if not same_origin(request) or request.headers.get("x-aiops-web") != "1":
+            return JSONResponse(status_code=403, content={"error": "invalid_origin"})
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", report_id):
+            return JSONResponse(status_code=422, content={"error": "invalid_report"})
+        payload = body.model_dump()
+        payload['reviewer'] = username
+        upstream = Request(api_url.rstrip('/') + '/v1/reports/' + report_id + '/evaluations',
+            data=json.dumps(payload).encode(), method='POST',
+            headers={'X-AIOps-Key': token, 'Content-Type': 'application/json'})
+        try:
+            with build_opener(ProxyHandler({}), NoRedirect()).open(upstream, timeout=10) as response:
+                raw = response.read(100001)
+                if len(raw) > 100000:
+                    raise ValueError('response too large')
+                return JSONResponse(status_code=201, content=json.loads(raw))
+        except HTTPError as exc:
+            codes = {401: 'api_authentication', 404: 'not_found',
+                     409: 'evaluation_conflict', 422: 'invalid_evaluation'}
+            return JSONResponse(status_code=exc.code if exc.code in codes else 502,
+                                content={'error': codes.get(exc.code, 'api_unavailable')})
+        except (OSError, URLError, ValueError):
+            return JSONResponse(status_code=502, content={'error': 'api_unavailable'})
 
     @app.get("/logs/stream")
     async def log_stream(request: WebRequest):

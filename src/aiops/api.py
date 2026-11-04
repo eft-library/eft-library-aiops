@@ -21,6 +21,7 @@ from aiops.collectors.config import load_config
 from aiops.collectors.service import CollectionService
 from aiops.operations import NoReportInput, status
 from aiops.providers.base import ErrorKind, ProviderError
+from aiops.storage.evaluations import EvaluationInput
 from aiops.storage.import_sqlite import sync_batches
 from aiops.storage.jobs import JobQueue, public_job, submit
 from aiops.worker import Worker
@@ -281,6 +282,24 @@ def create_app(settings, *, token: str, sources_config: Path, provider=None, inv
         from aiops.storage import views
 
         return views.jobs(settings, status=status, page=page, page_size=page_size)
+
+    @app.get("/v1/reports/{report_id}/evaluations")
+    def evaluation_list(report_id: str):
+        from aiops.storage.evaluations import read_evaluations
+        try:
+            return read_evaluations(settings, report_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="completed_report_required") from None
+
+    @app.post("/v1/reports/{report_id}/evaluations", status_code=201)
+    def evaluation_save(report_id: str, body: EvaluationInput):
+        from aiops.storage.evaluations import save_evaluation
+        try:
+            return save_evaluation(settings, report_id, body)
+        except FileExistsError:
+            raise HTTPException(status_code=409, detail="evaluation_conflict") from None
+        except LookupError:
+            raise HTTPException(status_code=404, detail="unknown_report_or_finding") from None
 
     @app.get("/v1/reports/{report_id}")
     def report_result(report_id: str):
