@@ -11,7 +11,7 @@ from aiops.investigation.models import (
 )
 from aiops.collectors.config import load_config
 from aiops.investigation.tools import catalogue, execute_plan, validate_plan
-from aiops.investigation.probes import collect_observations
+from aiops.investigation.probes import collect_observations, limit_log_text
 from aiops.investigation.store import POLICY_HASH, InvestigationStore
 from aiops.providers.base import AnalysisRequest, ErrorKind, ProviderError
 from aiops.providers.codex import CodexProvider
@@ -61,7 +61,9 @@ def prepare_input(parent, observations, limit):
         # Retain the historical report; discard detail fairly across log sources first.
         for observation in observations:
             if observation['probe'] == 'recent_log_tail':
-                observation['data']['text'] = observation['data'].get('text', '')[:800]
+                limit_log_text(observation['data'], 800, 'investigation_input_limit')
+                if observation['data'].get('truncated'):
+                    observation['status'] = 'partial'
         while len(encoded(snapshot).encode()) > cap and snapshot['observations']:
             snapshot['observations'].pop()
         if len(encoded(snapshot).encode()) > cap:
@@ -134,7 +136,7 @@ def run_once(settings, sources_config, *, investigation_id=None, provider=None, 
                 sanitizer = PublicProgress(settings, lambda event: None)
                 def clean(item):
                     if isinstance(item, str):
-                        return sanitizer.clean(item)
+                        return sanitizer.mask_text(item)
                     if isinstance(item, list):
                         return [clean(value) for value in item]
                     if isinstance(item, dict):

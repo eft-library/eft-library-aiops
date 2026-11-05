@@ -14,7 +14,7 @@ import psutil
 from aiops.collectors.docker import DockerCollector
 from aiops.collectors.system import SystemCollector
 from aiops.investigation.models import PlanningResult
-from aiops.investigation.probes import log_excerpt, now, open_regular, postgres_statistics
+from aiops.investigation.probes import log_excerpt, limit_log_text, now, open_regular, postgres_statistics
 from aiops.providers.base import ErrorKind, ProviderError
 
 
@@ -267,6 +267,11 @@ def bound_probe_output(data):
     if size() <= 12000:
         return data
     data['truncated'] = True
+    if 'text' in data:
+        cap = min(8192, len(data['text'].encode()))
+        while size() > 12000 and data.get('text'):
+            limit_log_text(data, cap, 'probe_output_limit')
+            cap //= 2
     data['output_omitted_events'] = 0
     data['output_shortened_messages'] = 0
     # Events already have relevance order. Keep identity/time/level for as many

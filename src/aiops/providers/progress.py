@@ -27,13 +27,18 @@ class PublicProgress:
                 pass
         self.seen_messages = set()
 
-    def clean(self, text):
+    def mask_text(self, text):
+        """Mask complete text without applying the progress-message display limit."""
         text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
         text = re.sub(r'[\x00-\x08\x0b-\x1f\x7f]', '', text)
         for secret in sorted(self.secrets, key=len, reverse=True):
             text = text.replace(secret, REDACTED)
         # Mask before truncation so split credentials cannot escape the masker.
         text = mask(text)
+        return text
+
+    def clean(self, text):
+        text = self.mask_text(text)
         return text[:4000] + (' [truncated]' if len(text) > 4000 else '')
 
     def line(self, line):

@@ -392,3 +392,67 @@ def test_plan_rejects_identifiers_for_live_tools():
                'identifiers': ['task_id'], 'reason': 'test'}
     with pytest.raises(ProviderError):
         validate_plan(empty_plan([request]), [{'tool': 'recent_logs', 'targets': ['fastapi']}], daily_parent())
+
+
+def test_recent_evidence_keeps_more_than_progress_limit_and_masks_secrets(tmp_path, monkeypatch):
+    from aiops.providers.progress import PublicProgress
+    root = tmp_path.resolve()
+    text = 'INFO checkpoint complete\n' * 180 + 'INFO latest password=private-log-secret\n'
+    (root / 'app.log').write_text(text)
+    config = root / 'sources.yaml'
+    config.write_text('sources:\n  postgresql:\n    type: file\n    path: app.log\nsystem:\n  enabled: false\n')
+    monkeypatch.setenv('TEST_PASSWORD', 'private-log-secret')
+    monkeypatch.setattr('aiops.investigation.probes.postgres_statistics', lambda settings: {})
+    settings = Settings(data_dir=root / 'data')
+    observations = collect_observations(settings, config)
+    log = observations[0]
+    assert len(log['data']['text']) > 4000
+    assert 'INFO latest' in log['data']['text']
+    assert 'private-log-secret' not in log['data']['text']
+    assert '[truncated]' not in log['data']['text']
+    assert log['data']['truncated'] is False
+    assert log['status'] == 'observed'
+    # Repeated masking before planning/handoff must also preserve the newest line.
+    cleaner = PublicProgress(settings, lambda event: None)
+    remasked = cleaner.mask_text(log['data']['text'])
+    assert remasked.startswith('INFO checkpoint complete\n' * 180)
+    assert 'INFO latest' in remasked
+    assert 'private-log-secret' not in remasked
+    assert cleaner.clean('INFO checkpoint complete\n' * 250).endswith('[truncated]')
+
+
+def test_recent_tail_flags_read_limit_and_unfinished_line(tmp_path, monkeypatch):
+    root = tmp_path.resolve()
+    (root / 'app.log').write_text('INFO previous\n' * 1000 + 'INFO newest complete\nunfinished')
+    config = root / 'sources.yaml'
+    config.write_text('sources:\n  fastapi:\n    type: file\n    path: app.log\nsystem:\n  enabled: false\n')
+    monkeypatch.setattr('aiops.investigation.probes.postgres_statistics', lambda settings: {})
+    log = collect_observations(Settings(data_dir=root / 'data'), config)[0]
+    assert log['data']['text'].endswith('INFO newest complete')
+    assert 'unfinished' not in log['data']['text']
+    assert set(log['data']['truncation_reasons']) == {'file_tail_limit', 'incomplete_final_line'}
+    assert log['data']['truncated'] is True
+    assert log['status'] == 'partial'
+
+
+def test_input_and_output_limits_keep_newest_whole_utf8_lines():
+    from aiops.investigation.probes import limit_log_text
+    from aiops.investigation.tools import bound_probe_output
+    text = '이전 기록\n' * 1000 + '가장 최근 완료 기록'
+    data = limit_log_text({'text': text}, 100, 'test_limit')
+    assert data['text'].endswith('가장 최근 완료 기록')
+    assert len(data['text'].encode()) <= 100
+    assert all(line in {'이전 기록', '가장 최근 완료 기록'} for line in data['text'].splitlines())
+    assert data['omitted_text_bytes'] == len(text.encode()) - len(data['text'].encode())
+    result = bound_probe_output({'text': text})
+    assert result['text'].endswith('가장 최근 완료 기록')
+    assert result['truncated'] is True
+    assert 'probe_output_limit' in result['truncation_reasons']
+    assert len(json.dumps(result, ensure_ascii=False).encode()) <= 12000
+    parent = {'report_id': 'daily-test', 'input_json': {}, 'result_json': {'report': {'summary': 'history'}}}
+    observation = {'observation_id': 'obs-1', 'probe': 'recent_log_tail', 'status': 'observed',
+                   'data': {'text': text}}
+    snapshot = prepare_input(parent, [observation], 4000)
+    assert snapshot['observations'][0]['data']['text'].endswith('가장 최근 완료 기록')
+    assert snapshot['observations'][0]['status'] == 'partial'
+    assert 'investigation_input_limit' in snapshot['observations'][0]['data']['truncation_reasons']

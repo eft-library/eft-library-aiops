@@ -40,6 +40,28 @@ def open_regular(path):
     return result
 
 
+def limit_log_text(data, max_bytes, reason):
+    """Keep a contiguous suffix of complete supplied lines, after masking."""
+    text = data.get('text', '')
+    original_bytes = len(text.encode('utf-8'))
+    if original_bytes <= max_bytes:
+        return data
+    kept, used = [], 0
+    for line in reversed(text.splitlines(keepends=True)):
+        length = len(line.encode('utf-8'))
+        if used + length > max_bytes:
+            break
+        kept.append(line)
+        used += length
+    data['text'] = ''.join(reversed(kept))
+    data['truncated'] = True
+    reasons = data.setdefault('truncation_reasons', [])
+    if reason not in reasons:
+        reasons.append(reason)
+    data['omitted_text_bytes'] = data.get('omitted_text_bytes', 0) + original_bytes - used
+    return data
+
+
 def log_excerpt(source):
     # Scan only a bounded portion. This is explicitly NOT historical recovery.
     candidates, scanned = [], 0
@@ -79,11 +101,18 @@ def log_excerpt(source):
         if offset:
             raw = raw.partition(b'\n')[2]
         # Do not present a half-written final record as a complete observation.
-        raw = raw.rpartition(b'\n')[0]
+        complete, separator, pending = raw.rpartition(b'\n')
+        incomplete = bool(pending)
+        raw = complete
+        reasons = []
+        if limited: reasons.append('file_scan_limit')
+        if offset: reasons.append('file_tail_limit')
+        if incomplete: reasons.append('incomplete_final_line')
         return {"text": raw.decode('utf-8', errors='replace'), "file_size_bytes": size,
                 "selected_file": str(candidates[0].relative_to(source.path)) if source.type != "file" else candidates[0].name,
                 "file_modified_at": datetime.fromtimestamp(info.st_mtime, timezone.utc).isoformat(),
-                "selection_basis": "file_modification_time", "truncated": limited,
+                "selection_basis": "file_modification_time", "truncated": bool(reasons),
+                "truncation_reasons": reasons,
                 "scanned_entries": scanned,
                 "scope": "One recent file tail, up to 8192 bytes, from at most 256 scanned entries. Not complete history."}
     finally:
@@ -121,15 +150,17 @@ def collect_observations(settings, sources_config):
             # Clean recursively, before persistence and model input. Truncation is explicit.
             def clean(item):
                 if isinstance(item, str):
-                    return cleaner.clean(item)
+                    return cleaner.mask_text(item)
                 if isinstance(item, dict):
                     return {str(key): clean(val) for key, val in item.items()}
                 if isinstance(item, (list, tuple)):
                     return [clean(val) for val in item]
                 if isinstance(item, (int, float, bool)) or item is None:
                     return item
-                return cleaner.clean(str(item))
+                return cleaner.mask_text(str(item))
             value = clean(value)
+            if isinstance(value, dict) and "text" in value:
+                limit_log_text(value, 8192, "masked_text_limit")
             status = "partial" if isinstance(value, dict) and (value.get("failures") or value.get("truncated")) else "observed"
         except (OSError, ValueError, ProviderError, psycopg.Error):
             value, status = {"reason": "probe_unavailable"}, "unavailable"
