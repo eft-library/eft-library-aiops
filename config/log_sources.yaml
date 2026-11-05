@@ -29,12 +29,16 @@ docker:
     - npm
   timeout_seconds: 10
 sources:
+  # Daily output from each service's restart script; legacy log.out is inactive.
   nextjs:
-    type: file
-    path: /home/frontend_a/eft-library-front/log.out
+    type: directory
+    path: /home/frontend_a/eft-library-front/log_history
+    pattern: '????-??-??.log'
   fastapi:
-    type: file
-    path: /home/backend/eft-library-back/log.out
+    type: directory
+    path: /home/backend/eft-library-back/log_history
+    # Exclude the log writer's own collector-error.out.
+    pattern: '????-??-??.out'
   postgresql:
     type: directory
     path: /var/lib/pgsql/17/data/log

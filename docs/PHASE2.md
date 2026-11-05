@@ -8,8 +8,8 @@ Codex 호출 없이도 기존 서비스의 로그와 시스템 상태를 **읽�
 
 | 서비스 | 로그 경로 | 유형/비고 |
 |---|---|---|
-| Next.js | `/example/logs/nextjs/log.out` | 단일 파일 |
-| FastAPI | `/example/logs/fastapi/log.out` | 단일 파일; `log.out.bak` 존재, 기본 수집 제외 |
+| Next.js | `/example/logs/nextjs/log_history/` | 날짜별 `YYYY-MM-DD.log` |
+| FastAPI | `/example/logs/fastapi/log_history/` | 날짜별 `YYYY-MM-DD.out`; `collector-error.out` 제외 |
 | PostgreSQL 17 | `/example/logs/postgresql/` | `postgresql-*.log`; 파일명은 배포 설정 확인 |
 | Redis | `/example/logs/redis/redis.log` | 단일 파일, 권한 제한 |
 | Kafka | `/example/logs/kafka/kafka.log` | 실행 스크립트 stdout/stderr |
@@ -47,11 +47,13 @@ defaults:
   max_read_mb: 50
 sources:
   nextjs:
-    type: file
-    path: /example/logs/nextjs/log.out
+    type: directory
+    path: /example/logs/nextjs/log_history
+    pattern: '????-??-??.log'
   fastapi:
-    type: file
-    path: /example/logs/fastapi/log.out
+    type: directory
+    path: /example/logs/fastapi/log_history
+    pattern: '????-??-??.out'
   postgresql:
     type: directory
     path: /example/logs/postgresql
