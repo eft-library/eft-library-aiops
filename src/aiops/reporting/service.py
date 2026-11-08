@@ -327,11 +327,12 @@ class ReportingService:
             row = self.reports.latest_completed("daily", day)
             if row is None:
                 missing.append(day)
-            elif not self._current(row, collection):
-                missing.append(day)
-                outdated.append(row["report_id"])
             else:
+                # A completed daily report remains evidence even if late logs
+                # were collected later. Flag its coverage; do not erase the day.
                 available.append(row)
+                if not self._current(row, collection):
+                    outdated.append(row["report_id"])
         return available, missing, outdated
 
     def _weekly_context(self, period, collection):
@@ -358,10 +359,12 @@ class ReportingService:
             value["period_start"]: value["report_id"] for value in available
         }:
             return False
-        if (
-            manifest["missing_dates"] != missing
-            or manifest["outdated_report_ids"] != outdated
-        ):
+        if manifest["missing_dates"] != missing:
+            return False
+        # Later raw collection does not change the pinned report inputs.
+        # A newer completed daily version still invalidates daily_report_ids.
+        if (manifest.get('daily_source_policy') != 'completed_versions_with_late_data_warning'
+                and manifest["outdated_report_ids"] != outdated):
             return False
         from aiops.investigation.store import completed_summaries
 
@@ -400,6 +403,7 @@ class ReportingService:
         manifest = {
             "schema_version": 1,
             "period": period.as_dict(),
+            "daily_source_policy": "completed_versions_with_late_data_warning",
             "daily_report_ids": {
                 row["period_start"]: row["report_id"] for row in available
             },
@@ -419,6 +423,7 @@ class ReportingService:
         manifest['operator_evaluations'] = copy.deepcopy(evaluations)
         daily_briefs = [brief(row) for row in available]
         for child in daily_briefs:
+            child['additional_collected_data'] = child['report_id'] in outdated
             if child["report_id"] in investigations:
                 child["investigation"] = investigations[child["report_id"]]
         snapshot = {
@@ -426,7 +431,8 @@ class ReportingService:
             "analysis_type": period.kind,
             "period": period.as_dict(),
             "data_quality": {
-                "complete": not missing and not incomplete,
+                "complete": not missing and not incomplete and not outdated,
+                "daily_source_policy": "completed_versions_with_late_data_warning",
                 "expected_daily_reports": len(period.days),
                 "available_daily_reports": len(available),
                 "missing_dates": missing,
@@ -448,7 +454,8 @@ class ReportingService:
             "weekly_context": [brief(row) for row in context],
             "limitations": [
                 "Daily reports are the primary evidence. Weekly context is supplemental; never add its counts again.",
-                "Do not infer healthy days from missing or outdated reports.",
+                "Completed daily reports remain included when later raw logs exist. outdated_report_ids marks included reports that do not cover all later collection; only missing_dates are absent days.",
+                "Totals describe the selected report snapshots, not all currently stored raw logs. Do not infer healthy days from missing reports or complete coverage from included older reports.",
                 "Only supplied report IDs are valid evidence references for this summary.",
                 "Each source report is summarized; full results and lineage remain in the report catalogue.",
             ],

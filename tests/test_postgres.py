@@ -1473,3 +1473,29 @@ def test_weekly_monthly_pin_latest_evaluations_and_revise_on_edits(pg_setup, mon
     assert len(source['weekly_context']) == 1
     assert source['operator_evaluations']['evaluated_findings'] == 1
     assert source['operator_evaluations']['total_findings'] == 3
+
+
+def test_queued_weekly_job_survives_late_raw_collection(pg_setup):
+    settings, service, _ = pg_setup
+    daily = seed(service)
+    queue = JobQueue(settings)
+    queue.enqueue(daily['report_id']); queue.close()
+    with Worker(settings, provider=FakeProvider()) as worker:
+        assert worker.once()['status'] == 'COMPLETED'
+    week = service.execute('weekly', '2019-12-30')
+    queue = JobQueue(settings)
+    queue.enqueue(week['report_id']); queue.close()
+    stamp = datetime(2020, 1, 1, 15, tzinfo=SEOUL)
+    add_batch(service, 'batch-after-weekly-submission', [stamp], collected_at=stamp)
+    assert service.is_current(week['report_id']) is True
+    provider = FakeProvider()
+    with Worker(settings, provider=provider) as worker:
+        result = worker.once()
+    assert result['status'] == 'COMPLETED'
+    assert len(provider.calls) == 1
+    assert provider.calls[0]['daily_reports'][0]['report_id'] == daily['report_id']
+    refreshed = service.execute('weekly', '2019-12-30')
+    source = json.loads(Path(refreshed['input']).read_text())
+    assert source['data_quality']['available_daily_reports'] == 1
+    assert '2020-01-01' not in source['data_quality']['missing_dates']
+    assert source['data_quality']['outdated_report_ids'] == [daily['report_id']]

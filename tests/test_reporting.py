@@ -230,11 +230,9 @@ def test_late_log_creates_new_revision_and_stale_ancestors(reporting):
         collected_at=datetime(2026, 10, 29, 12, tzinfo=SEOUL),
     )
     stale = {row["report_id"]: row["stale"] for row in service.list()}
-    assert (
-        stale[daily["report_id"]]
-        and stale[weekly["report_id"]]
-        and stale[monthly["report_id"]]
-    )
+    assert stale[daily["report_id"]]
+    assert not stale[weekly["report_id"]]
+    assert not stale[monthly["report_id"]]
     revised = service.execute("daily", "2026-10-27", analyze=True)
     assert revised["revision"] == 2
     assert content(revised)["totals"]["events"] == 2
@@ -260,9 +258,12 @@ def test_weekly_marks_missing_and_stale_days(reporting):
     add_batch(service, "batch-late", [stamp])
     rebuilt = service.execute("weekly", "2026-10-26")
     data = content(rebuilt)
-    assert data["daily_reports"] == []
+    assert [child['report_id'] for child in data['daily_reports']] == [daily['report_id']]
+    assert data['daily_reports'][0]['additional_collected_data'] is True
+    assert data['observed_totals']['events'] == 1
     assert daily["report_id"] in data["data_quality"]["outdated_report_ids"]
-    assert len(data["data_quality"]["missing_dates"]) == 7
+    assert len(data["data_quality"]["missing_dates"]) == 6
+    assert data['data_quality']['complete'] is False
 
 
 def test_month_uses_daily_reports_and_weekly_only_as_context(reporting):
@@ -486,3 +487,28 @@ def test_evaluation_detail_cap_preserves_counts_and_archived_snapshot():
     assert result['operator_evaluations']['verdict_counts']['correct'] == 8
     assert result['operator_evaluations']['omitted_details'] == 8
     assert len(archived['items']) == 8
+
+
+def test_week_and_month_keep_completed_days_after_late_collection(reporting):
+    service, _ = reporting
+    start = datetime(2026, 10, 26, 10, tzinfo=SEOUL)
+    originals = []
+    for offset in range(7):
+        stamp = start + timedelta(days=offset)
+        add_batch(service, f'batch-original-{offset}', [stamp])
+        originals.append(service.execute('daily', stamp.date().isoformat(), analyze=True))
+    for offset in range(7):
+        add_batch(service, f'batch-later-{offset}', [start + timedelta(days=offset, hours=1)])
+    week = service.execute('weekly', '2026-10-26')
+    week_source = content(week)
+    assert len(week_source['daily_reports']) == 7
+    assert week_source['data_quality']['missing_dates'] == []
+    assert len(week_source['data_quality']['outdated_report_ids']) == 7
+    assert all(child['additional_collected_data'] for child in week_source['daily_reports'])
+    assert week_source['observed_totals']['events'] == 7  # pinned reports, not fourteen raw events
+    assert week_source['data_quality']['complete'] is False
+    month_source = content(service.execute('monthly', '2026-10-01'))
+    assert len(month_source['daily_reports']) == 6  # November 1 is outside October
+    assert len(month_source['data_quality']['outdated_report_ids']) == 6
+    assert month_source['observed_totals']['events'] == 6
+    assert '2026-10-26' not in month_source['data_quality']['missing_dates']
