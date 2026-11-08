@@ -32,6 +32,8 @@ explicit log evidence of slow/failed operations may still be discussed cautiousl
 Each section must include summary, findings, limitations. State missing measurements,
 truncated evidence and collection gaps. For non-daily inputs the sections may be null;
 weekly/monthly summaries should use supplied daily section summaries when available.
+Automatic reviews in daily investigation summaries are AI-generated observations/hypotheses,
+not human evaluation labels. Never count them as operator-confirmed correct results.
 For weekly/monthly inputs, operator_evaluations contains code-computed latest operator
 labels for the selected daily versions. Discuss these separately from service-health facts:
 report verdict counts, sample size, coverage, usefulness, confirmed outcomes and unresolved

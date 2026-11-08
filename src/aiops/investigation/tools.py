@@ -35,6 +35,16 @@ def catalogue(config):
         {'tool': 'database_statistics', 'targets': ['aiops_database'], 'scope': 'Configured AIOps DB statistics only; fixed read-only SQL, no application DB access or query text.'},
         {'tool': 'process_summary', 'targets': ['host'], 'scope': 'Counts/RSS for known program names; <=512 processes/2 seconds. No arguments, environment, executable paths or proof of service health.'},
     ]
+    daily_targets = [name for name, source in config.sources.items()
+                     if source.enabled and source.type == 'directory' and source.daily_filename]
+    if daily_targets:
+        tools.append({'tool': 'incident_logs', 'targets': daily_targets,
+            'scope': 'One configured date-specific raw log; required incident anchor, optional literal search_terms, +/-15min within report period; 64MiB/4sec/32 events. All search_terms match a request, surrounding errors are included independently. Full-file term counts if scan completes; never equate absent logs with no incident.'})
+    code_targets = [name for name, source in config.code_sources.items() if source.enabled]
+    if code_targets:
+        tools.append({'tool': 'source_code', 'targets': code_targets,
+            'bundles': {name: config.code_sources[name].description for name in code_targets},
+            'scope': 'Explicit read-only source bundles; literal search_terms required (any term), no anchor. Limited numbered excerpts and content hashes; deployment at incident time is unverified. No imports, commands or arbitrary paths.'})
     if config.system.enabled:
         tools.append({'tool': 'system_metrics', 'targets': ['system'], 'scope': 'Configured current system and disk samples, not historical metrics.'})
     if config.docker.enabled:
@@ -54,15 +64,26 @@ def validate_plan(result, catalog, parent):
             if request.target not in allowed.get(request.tool, set()):
                 raise ValueError('unlisted tool or target')
             if request.anchor is not None:
-                if request.tool != 'historical_logs' or request.anchor.tzinfo is None or not start <= request.anchor < end:
+                if request.tool not in {'historical_logs', 'incident_logs'} or request.anchor.tzinfo is None or not start <= request.anchor < end:
                     raise ValueError('invalid historical anchor')
             if request.identifiers:
                 if request.tool != 'historical_logs' or any(
                     not re.fullmatch(r'[A-Za-z0-9_.:+@=-]{1,160}', value) for value in request.identifiers
                 ):
                     raise ValueError('invalid historical identifiers')
+            if request.tool == 'incident_logs' and request.anchor is None:
+                raise ValueError('incident anchor required')
+            if request.tool == 'source_code' and not request.search_terms:
+                raise ValueError('source search terms required')
+            if request.search_terms:
+                if request.tool not in {'incident_logs', 'source_code'} or any(
+                    not isinstance(value, str) or not 2 <= len(value) <= 160
+                    or any(ord(char) < 32 or ord(char) == 127 for char in value)
+                    for value in request.search_terms
+                ):
+                    raise ValueError('invalid literal terms')
             identity = (request.tool, request.target, request.anchor.isoformat() if request.anchor else None,
-                        tuple(request.identifiers or []))
+                        tuple(request.identifiers or []), tuple(request.search_terms or []))
             if identity in seen:
                 raise ValueError('duplicate probe request')
             seen.add(identity)
@@ -243,6 +264,14 @@ def process_summary():
 def dispatch(request, settings, config, parent):
     if request.tool == 'historical_logs':
         return historical_logs(settings, parent, request.target, request.anchor, request.identifiers)
+    if request.tool == 'incident_logs':
+        from aiops.investigation.incident import incident_logs
+        start, end = period_bounds(parent)
+        return incident_logs(settings, config.sources[request.target], request.target,
+                             request.anchor, request.search_terms, start, end)
+    if request.tool == 'source_code':
+        from aiops.investigation.incident import source_code
+        return source_code(settings, config.code_sources[request.target], request.search_terms)
     if request.tool == 'recent_logs':
         return log_excerpt(config.sources[request.target])
     if request.tool == 'database_statistics':

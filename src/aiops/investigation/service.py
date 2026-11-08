@@ -23,6 +23,17 @@ def encoded(value):
     return json.dumps(value, ensure_ascii=False, separators=(',', ':'), default=str)
 
 
+def historical_examples(source, report):
+    """Keep cited incident evidence ahead of unrelated representative records."""
+    findings = list(report.get('findings', []))
+    for key in ('incident_analysis', 'performance_analysis'):
+        findings.extend((report.get(key) or {}).get('findings', []))
+    cited = {reference for finding in findings for reference in finding.get('evidence_ids', [])}
+    selected = sorted(source.get('events', []), key=lambda event: event.get('event_id') not in cited)[:20]
+    return [{key: event.get(key) for key in ('event_id', 'timestamp', 'service', 'level', 'message', 'file')}
+            for event in selected]
+
+
 def prepare_input(parent, observations, limit):
     result = parent['result_json']
     source = parent['input_json']
@@ -83,9 +94,11 @@ def validate_result(result, snapshot):
     allowed = {snapshot['report_id'], *(o['observation_id'] for o in snapshot['observations'])}
     if result.report.operator_handoff.urgency == 'ACT_NOW':
         current = {item['observation_id'] for item in snapshot['observations']
-                   if item.get('status') == 'observed' and item.get('probe') not in {'historical_logs'}}
+                   if item.get('status') == 'observed' and item.get('probe') not in {'historical_logs', 'incident_logs', 'source_code'}}
         if not any(ref in current for action in result.report.operator_handoff.first_actions for ref in action.evidence_ids):
             raise ProviderError(ErrorKind.OUTPUT)
+    if any(issue.automatic_review is None for issue in result.report.findings):
+        raise ProviderError(ErrorKind.OUTPUT)
     references = [ref for issue in result.report.findings for ref in issue.evidence_ids]
     references += [ref for action in result.report.operator_handoff.first_actions for ref in action.evidence_ids]
     if any(ref not in allowed for ref in references):
@@ -145,10 +158,7 @@ def run_once(settings, sources_config, *, investigation_id=None, provider=None, 
                 source = parent['input_json']
                 if isinstance(source, str):
                     source = json.loads(source)
-                snapshot['historical_examples'] = [
-                    {key: event.get(key) for key in ('event_id', 'timestamp', 'service', 'level', 'message')}
-                    for event in source.get('events', [])[:20]
-                ]
+                snapshot['historical_examples'] = historical_examples(source, snapshot['historical_report'])
                 snapshot['tool_catalog'] = catalog
                 snapshot['stage'] = 'planning'
                 snapshot = bound_snapshot(clean(snapshot), settings.max_input_bytes)

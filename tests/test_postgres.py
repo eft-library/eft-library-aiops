@@ -1291,7 +1291,7 @@ def test_automatic_investigation_uses_two_isolated_codex_calls(pg_setup,monkeypa
         assert command[command.index('--sandbox')+1]=='read-only'
         assert 'AIOPS_DATABASE_URL' not in kwargs['env'] and 'PGPASSWORD' not in kwargs['env']
         if 'requests' in schema['properties']:
-            assert schema['$defs']['ProbeRequest']['required']==['tool','target','anchor','identifiers','reason']
+            assert schema['$defs']['ProbeRequest']['required']==['tool','target','anchor','identifiers','search_terms','reason']
             payload=empty_plan().report.model_dump_json()
             calls.append('plan')
         else:
@@ -1499,3 +1499,51 @@ def test_queued_weekly_job_survives_late_raw_collection(pg_setup):
     assert source['data_quality']['available_daily_reports'] == 1
     assert '2020-01-01' not in source['data_quality']['missing_dates']
     assert source['data_quality']['outdated_report_ids'] == [daily['report_id']]
+
+
+def test_incident_logs_and_source_review_persist_without_human_labels(pg_setup):
+    from test_investigation import guide, empty_plan
+    from aiops.investigation.store import InvestigationStore
+    from aiops.investigation.service import run_once
+    settings, service, config = pg_setup
+    parent = seed(service)
+    queue = JobQueue(settings);queue.enqueue(parent['report_id']);queue.close()
+    with Worker(settings, provider=FakeProvider()) as worker:
+        worker.once()
+    root = config.parent.resolve()
+    logs = root / 'daily-logs'; logs.mkdir()
+    (logs / '2020-01-01.out').write_text('2020-01-01 11:15:13 - INFO - "GET /api/user/v3/user-info" 503 - 0.06s\n')
+    code = root / 'app-source';code.mkdir()
+    (code / 'user.py').write_text('def verify_token():\n    raise RuntimeError("test only; never execute")\n')
+    config.write_text(yaml.safe_dump({'sources': {'fastapi': {'type':'directory','path':str(logs),
+        'pattern':'*.out', 'daily_filename':'%Y-%m-%d.out'}}, 'system':{'enabled':False},
+        'code_sources':{'fastapi_user': {'root':str(code),'files':['user.py'],'description':'user token'}}}))
+    store = InvestigationStore(settings)
+    job = store.enqueue(parent['report_id'], 'incident-test', None)
+    class Provider:
+        def plan(self, request):
+            return empty_plan([
+                {'tool':'incident_logs','target':'fastapi','anchor':'2020-01-01T11:15:13+09:00',
+                 'search_terms':['user-info'],'reason':'request context'},
+                {'tool':'source_code','target':'fastapi_user','anchor':None,
+                 'search_terms':['verify_token'],'reason':'code branch'}])
+        def analyze(self, request):
+            snapshot = json.loads(request.snapshot)
+            observations = snapshot['observations']
+            assert observations[0]['probe'] == 'incident_logs'
+            assert observations[0]['data']['events'][0]['http_status'] == 503
+            assert observations[1]['probe'] == 'source_code'
+            assert observations[1]['data']['deployment_match'] == 'unverified'
+            assert 'def verify_token' in observations[1]['data']['text']
+            result = guide(parent['report_id'])
+            result.report.findings[0].evidence_ids = ['extra-1', 'extra-2']
+            result.report.findings[0].automatic_review.status = 'hypothesis_only'
+            return result
+    try:
+        assert run_once(settings, config, provider=Provider(), probes=lambda *args:[])['status'] == 'COMPLETED'
+        saved = store.get(job['investigation_id'])
+        assert saved['result']['report']['findings'][0]['automatic_review']['status'] == 'hypothesis_only'
+        assert saved['input']['probe_execution'][0]['probe'] == 'incident_logs'
+        assert store.db.execute('SELECT count(*) AS n FROM public.aiops_finding_evaluations').fetchone()['n'] == 0
+    finally:
+        store.close()

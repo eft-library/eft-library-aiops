@@ -22,9 +22,12 @@ class Source(Defaults):
     type: Literal["file", "directory"]
     path: Path
     pattern: str = "*.log"
+    daily_filename: Literal["%Y-%m-%d.log", "%Y-%m-%d.out"] | None = None
 
     @model_validator(mode="after")
     def valid(self):
+        if self.daily_filename and self.type != 'directory':
+            raise ValueError('daily_filename requires a directory source')
         if (
             "/" in self.pattern
             or "\\" in self.pattern
@@ -57,10 +60,28 @@ class DockerConfig(StrictModel):
         return self
 
 
+class CodeSource(StrictModel):
+    enabled: bool = True
+    root: Path
+    files: list[str] = Field(min_length=1, max_length=8)
+    description: str = Field(min_length=1, max_length=400)
+
+    @model_validator(mode="after")
+    def safe_files(self):
+        for value in self.files:
+            path = Path(value)
+            if (path.is_absolute() or '..' in path.parts or '\\' in value
+                    or any(part.startswith('.') for part in path.parts)
+                    or path.suffix not in {'.py', '.js', '.ts', '.tsx', '.jsx'}):
+                raise ValueError('code files must be explicit relative source paths')
+        return self
+
+
 class CollectionConfig(StrictModel):
     version: Literal[1] = 1
     defaults: Defaults = Field(default_factory=Defaults)
     sources: dict[str, Source] = Field(max_length=64)
+    code_sources: dict[str, CodeSource] = Field(default_factory=dict, max_length=16)
     system: SystemConfig = Field(default_factory=SystemConfig)
     docker: DockerConfig = Field(default_factory=DockerConfig)
     max_total_read_mb: float = Field(default=20, gt=0, le=200)
@@ -121,4 +142,12 @@ def load_config(path: Path) -> CollectionConfig:
             target == pg_logs or pg_logs in target.parents
         ):
             raise ValueError("PostgreSQL data files are not collection sources")
+    for name, source in config.code_sources.items():
+        if not re.fullmatch(r'[a-z][a-z0-9_]{0,63}', name):
+            raise ValueError('invalid code source alias')
+        source.root = source.root.expanduser()
+        if not source.root.is_absolute():
+            source.root = path.resolve().parent / source.root
+        if source.root.resolve() in {Path(value).resolve() for value in ('/', '/home', '/var')}:
+            raise ValueError('unsafe code source root')
     return config

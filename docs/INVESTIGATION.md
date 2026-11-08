@@ -155,3 +155,37 @@ uv run aiops --env-file .env index-logs
 마스킹 후 크기 제한, 조사 입력 제한, 추가 프로브 출력 제한으로 텍스트를 더 줄여야 한다면 최근의 완성된 줄부터 보존합니다. `omitted_text_bytes`는 해당 전달 단계에서 추가로 제외한 UTF-8 바이트 수이며 원본 파일 전체의 누락량은 아닙니다. 생략 이유는 각각 `masked_text_limit`, `investigation_input_limit`, `probe_output_limit`입니다. 마지막 완성 줄 하나가 제한보다 크면 잘린 문자열을 근거로 제시하는 대신 빈 부분 관측을 반환할 수 있습니다.
 
 새 SQL, 환경 변수, 로그 인덱스 재생성은 필요 없습니다. API·조사 워커에 코드를 반영한 뒤 새로 실행한 심화 조사부터 적용되며, 기존 조사에 저장한 본문과 메타데이터는 변경하지 않습니다.
+
+### 사건별 자동 조사와 선택적 운영자 검토
+
+기존 일일 심화 조사에 `incident_logs`와 `source_code`를 추가했습니다. 별도 DAG나 추가 모델 호출을 늘리지 않고 기존 **조회 계획 → 허용된 조회 실행 → 결과 해석** 흐름 안에서 선택합니다. 계획은 최대 5개 조회이며 모든 대상·시각·문자열을 검증한 뒤 실행합니다.
+
+- `incident_logs`: `daily_filename`이 지정된 소스만 사용합니다. 보고서 기간 안의 anchor로 날짜 파일을 정하고, 요청 시각 ±15분의 요청·주변 오류와 이어지는 예외 행을 선택합니다. 최대 64MiB·4초·32건입니다. 검색어는 정규식이나 명령이 아닌 문자열이며 최대 3개입니다. 검색어 출현 횟수는 스캔한 파일 부분 기준이고 `full_file_scan_completed`로 끝까지 읽었는지 표시합니다. 원본 파일 하나를 끝까지 읽었어도 서비스 전체 기록의 완전성은 보장하지 않습니다. 사건 시각과 가까운 실패 요청·오류를 우선 보존합니다.
+- `source_code`: 설정의 `code_sources` 별칭만 선택합니다. root 아래 명시한 상대 소스 파일만 읽고, 문자열 주변의 줄 번호·내용·파일 크기·수정 시각·가능한 전체 파일 SHA-256을 반환합니다. 파일당 최대 128KiB·검색 위치 4곳과 전체 약 6KiB의 코드 본문을 사용합니다. 상대 경로의 상위 이동·숨김 파일·심볼릭 링크를 거부하며 코드 import, 셸, git, 애플리케이션 호출은 실행하지 않습니다.
+
+운영 설정 예시는 다음을 추가했습니다.
+
+```yaml
+sources:
+  fastapi:
+    type: directory
+    path: /home/backend/eft-library-back/log_history
+    pattern: '????-??-??.out'
+    daily_filename: '%Y-%m-%d.out'
+code_sources:
+  fastapi_user:
+    root: /home/backend/eft-library-back
+    description: user-info, get_user_v3, Google token verification
+    files:
+      - api/user/user_router.py
+      - api/user/service.py
+      - api/user/util.py
+```
+
+운영 프로필에는 Next.js 날짜별 `.log`와 FastAPI 날짜별 `.out`, FastAPI 사용자·파티방 소스 묶음을 등록했습니다. 실제 배포 파일 경로와 AIOps 실행 계정의 읽기 권한을 확인하세요. 소스 파일이 없거나 읽지 못하면 그 실패를 근거에 표시합니다. 로그와 코드의 비밀값은 저장·모델 전달 전에 마스킹하며, 추가 프로브 출력·전체 입력 크기 제한도 유지합니다.
+
+현재 읽은 소스에는 `deployment_match=unverified`를 기록합니다. 해시와 수정 시각이 있어도 사건 당시의 배포 버전과 같다고 단정하지 않습니다. 오류 로그가 없다는 사실만으로 특정 예외 분기를 확정하거나, 직후 HTTP 200을 같은 사용자의 복구로 처리하지 않습니다. 서로 다른 시각·엔드포인트·방의 사건은 구분합니다.
+
+새 조사 결과의 각 발견 사항에는 `automatic_review`를 저장합니다. 상태는 `evidence_found`(근거 확보), `hypothesis_only`(가설 유지), `insufficient_data`(자료 부족)이며 운영자 확인 필요 여부·이유·관측 결과·남은 질문을 포함합니다. 근거 확보는 원인 진단의 정답 판정이 아닙니다. 화면의 **사건별 자동 조사**에서 우선 수동 확인 대상만 먼저 보여주고 나머지는 접습니다. 운영자 평가는 필요한 항목만 선택적으로 입력하면 됩니다. 자동 조사 결과는 기존 평가 테이블에 사람의 평가로 쓰지 않고 조사 JSON에 저장하며 주간·월간에도 구분해서 전달합니다.
+
+API·조사 Worker에 코드와 `config/log_sources.yaml`을 배포하고 새 심화 조사를 실행하면 적용됩니다. SQL·환경 변수·로그 인덱스 재생성은 필요 없습니다. 기존 조사 결과는 바꾸지 않습니다. 현재 Airflow의 일일 01시·주간 02시·월간 03시와 마감일 조사·겹치는 주간 완료 Sensor를 그대로 사용합니다. `run_investigation_until_completed`는 이 조사 전체를 포함하므로 별도 DAG나 의존 태스크를 추가할 필요가 없습니다.

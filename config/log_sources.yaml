@@ -34,11 +34,13 @@ sources:
     type: directory
     path: /home/frontend_a/eft-library-front/log_history
     pattern: '????-??-??.log'
+    daily_filename: '%Y-%m-%d.log'
   fastapi:
     type: directory
     path: /home/backend/eft-library-back/log_history
     # Exclude the log writer's own collector-error.out.
     pattern: '????-??-??.out'
+    daily_filename: '%Y-%m-%d.out'
   postgresql:
     type: directory
     path: /var/lib/pgsql/17/data/log
@@ -73,3 +75,22 @@ sources:
     type: directory
     path: /home/tool/rustfs/logs
     pattern: '*.log'
+
+# Read-only source bundles. Missing/unreadable files yield unavailable evidence;
+# a current checkout is never assumed to be the code deployed at incident time.
+code_sources:
+  fastapi_user:
+    root: /home/backend/eft-library-back
+    description: FastAPI /api/user/v3/user-info, get_user_v3, Google token verification and user lookup
+    files:
+      - api/user/user_router.py
+      - api/user/service.py
+      - api/user/util.py
+  fastapi_party:
+    root: /home/backend/eft-library-back
+    description: FastAPI party rooms join/410 responses, disconnect grace, member cleanup and room closure
+    files:
+      - api/live_map/party/router.py
+      - api/live_map/party/service.py
+      - api/live_map/party/realtime_service.py
+      - api/live_map/party/lifecycle.py

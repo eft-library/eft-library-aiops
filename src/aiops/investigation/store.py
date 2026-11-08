@@ -147,7 +147,8 @@ def completed_summaries(settings, report_ids):
         'investigation_id': str(row['investigation_id']), 'finished_at': row['finished_at'].isoformat(),
         'summary': row['result_json']['report']['summary'][:1000],
         'findings': [{'issue': finding['issue'][:300], 'assessment': finding['assessment'][:400],
-                      'proposed_responses': [r['action'][:300] for r in finding['responses'][:2]]}
+                      'proposed_responses': [r['action'][:300] for r in finding['responses'][:2]],
+                      'automatic_review': finding.get('automatic_review')}
                      for finding in row['result_json']['report']['findings'][:3]],
         'limitations': [text[:200] for text in row['result_json']['report']['limitations'][:3]],
         'scope': 'Follow-up observations after the daily period; proposed responses, not performed actions.'
