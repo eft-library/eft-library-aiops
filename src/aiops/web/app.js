@@ -144,15 +144,18 @@ async function dashboard(ticket) {
 }
 function option(value,label,current) {return `<option value="${esc(value)}" ${value===current?'selected':''}>${esc(label)}</option>`;}
 async function reportsPage(query,ticket) {
- const filters=new URLSearchParams(query); const params=new URLSearchParams(filters);params.set('page_size','12');
+ const filters=new URLSearchParams(query);
+ const kind=Object.hasOwn(kinds,filters.get('type'))?filters.get('type'):'daily';
+ filters.set('type',kind);const params=new URLSearchParams(filters);params.set('page_size','12');
  const data=await api('reports?'+params);if(ticket!==revision)return;
  content.innerHTML=head('분석 보고서','기간별 분석 결과와 발견 사항을 확인하세요.','ANALYSIS REPORTS')+`
- <form id="report-filters" class="filterbar"><label class="field"><span>보고서 유형</span><select name="type">${option('','전체 유형',filters.get('type')||'')}${Object.entries(kinds).map(([key,label])=>option(key,label,filters.get('type'))).join('')}</select></label>
+ <nav class="report-type-tabs" aria-label="보고서 유형">${Object.entries(kinds).map(([key,label])=>{const values=new URLSearchParams(filters);values.set('type',key);values.delete('page');return `<a href="#reports?${esc(values.toString())}" ${key===kind?'aria-current="page"':''}>${esc(label)}</a>`;}).join('')}</nav>
+ <form id="report-filters" class="filterbar"><input type="hidden" name="type" value="${esc(kind)}">
  <label class="field"><span>위험도</span><select name="severity">${option('','전체 위험도',filters.get('severity')||'')}${['CRITICAL','WARNING','INFO','OK'].map(key=>option(key,labels[key],filters.get('severity'))).join('')}</select></label>
  <label class="field"><span>분석 상태</span><select name="status">${option('','전체 상태',filters.get('status')||'')}${['COMPLETED','RUNNING','PREPARED','FAILED','CANCELLED'].map(key=>option(key,labels[key],filters.get('status'))).join('')}</select></label>
  <label class="field"><span>분석 시작일 · 이후</span><input type="date" name="start" value="${esc(filters.get('start')||'')}"></label><label class="field"><span>분석 시작일 · 이전</span><input type="date" name="end" value="${esc(filters.get('end')||'')}"></label>
  <label class="checkbox"><input type="checkbox" name="history" value="true" ${filters.get('history')==='true'?'checked':''}>이전 수정본 포함</label><button class="button" type="submit">${icon('search')}조회</button></form>
- <p class="result-count">${num(data.total)}개의 보고서 ${filters.get('history')==='true'?'· 전체 수정본':'· 기간별 최신 수정본'}</p><section class="panel">${reportTable(data.items)}${pager(data)}</section>`;
+ <p class="result-count">${num(data.total)}개의 ${esc(kinds[kind])} 보고서 · 분석 기간 최신순 ${filters.get('history')==='true'?'· 전체 수정본':'· 기간별 최신 수정본'}</p><section class="panel">${reportTable(data.items)}${pager(data)}</section>`;
  document.getElementById('report-filters').addEventListener('submit',event=>{
   event.preventDefault();const values=new URLSearchParams();for(const [key,value] of new FormData(event.currentTarget)){if(value)values.set(key,value);}
   if(values.get('start')&&values.get('end')&&values.get('start')>values.get('end')){showToast('시작일이 종료일보다 늦습니다.');return;}
@@ -282,7 +285,7 @@ async function detailPage(id,ticket) {
  const observed=daily?quality.observed_slots:quality.available_daily_reports;
  const ratio=expected?Math.min(100,Math.max(0,Number(observed || 0)/Number(expected)*100)):0;
  const childIds=Object.values(data.lineage?.daily_report_ids || {});
- content.innerHTML=`<a class="back-link" href="#reports">${icon('arrow')}보고서 목록으로</a>`+head(`${kinds[data.kind] || ''} 분석 보고서`,`${period(data)} · ${data.report_id}`,'REPORT DETAILS',`<span class="date-chip">${badge(data.status)}</span>`)+`
+ content.innerHTML=`<a class="back-link" href="#reports?type=${esc(data.kind)}">${icon('arrow')}보고서 목록으로</a>`+head(`${kinds[data.kind] || ''} 분석 보고서`,`${period(data)} · ${data.report_id}`,'REPORT DETAILS',`<span class="date-chip">${badge(data.status)}</span>`)+`
  <div class="report-navigation" role="navigation" aria-label="보고서 구역"><span>보고서 탐색</span><button type="button" data-section="report-overview">종합 요약</button>${daily?'<button type="button" data-section="incident_analysis">장애 분석</button><button type="button" data-section="performance_analysis">성능 분석</button><button type="button" data-section="investigation">심화 조사</button>':''}<button type="button" data-section="report-limitations">분석 한계</button><button type="button" data-section="all-evidence">전체 근거</button><button type="button" data-section="report-evaluations">분석 평가</button>${data.operator_evaluations?'<button type="button" data-section="evaluation-rollup">분석 품질 검토</button>':''}</div>
  <div class="detail-layout"><div class="detail-main"><section class="panel detail-summary" id="report-overview"><div class="detail-period">${esc(period(data))} <span class="muted">· Asia/Seoul</span></div><h2>분석 요약</h2>${badge(report?.severity)}<p>${esc(report?.summary || (data.status==='FAILED'?'분석을 완료하지 못했습니다. 작업 현황에서 오류를 확인하세요.':'아직 완료된 분석 결과가 없습니다.'))}</p></section>
  <section class="panel"><div class="panel-heading"><h2>주요 발견 사항<span class="sub">${num(report?.findings?.length || 0)}개의 항목 · 관측 사실과 가설을 구분해 확인하세요.</span></h2></div>${report?.findings?.length?report.findings.map((finding,index)=>`<article class="finding"><div class="finding-head"><span class="finding-index">${String(index+1).padStart(2,'0')}</span><h3>${esc(finding.issue)}</h3></div><div class="finding-body"><h4>원인 가설</h4><p>${esc(finding.hypothesis)}</p><h4>확인 권고</h4><ul>${finding.recommended_checks.map(check=>`<li>${esc(check)}</li>`).join('')}</ul><h4>분석 근거 · 펼쳐서 보기</h4>${finding.evidence_ids.map(eid=>evidenceDisplay(eid,data)).join('')}</div></article>`).join(''):empty('표시할 발견 사항이 없습니다','분석 결과가 생성되면 근거와 함께 확인할 수 있습니다.')}</section>
